@@ -2,6 +2,10 @@
 
 本文件定义 AI 编码助手在此仓库中应遵循的工作方式。
 
+## 项目上下文入口
+
+首次接手或恢复上下文时，先阅读 [docs/project-context.md](docs/project-context.md)，了解模块入口、生成链路、持久化边界和验证方式；相关架构变更后同步更新该文档，具体实现以当前源码为准。
+
 ## 项目概况
 
 - React 19 + Vite + TypeScript 前端应用，使用 Zustand 状态管理、Tailwind CSS 样式。
