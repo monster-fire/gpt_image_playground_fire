@@ -6,6 +6,7 @@ import {
   useStore,
 } from '../../store'
 import { ALL_FAVORITES_COLLECTION_ID } from '../../lib/favoriteState'
+import { taskDeletionMessage, taskDeletionSignature } from '../../lib/taskDeletionPreview'
 import { useDragSelect } from '../../hooks/useDragSelect'
 import { FavoriteIcon } from '../icons'
 import { FavoriteCollectionOverviewCard } from './FavoriteCollectionOverviewCard'
@@ -86,18 +87,36 @@ export function FavoriteCollectionsView() {
 
   const handleDelete = (collection: FavoriteCollection, collectionTasks: TaskRecord[]) => {
     if (collections.length <= 1) return
+    const signature = taskDeletionSignature(collectionTasks)
     const imageCount = new Set(collectionTasks.flatMap((task) => task.outputImages || [])).size
     setConfirmDialog({
       title: '删除收藏夹',
-      message: `确定要删除收藏夹「${collection.name}」吗？`,
+      message: imageCount > 0
+        ? `确定要删除收藏夹「${collection.name}」吗？\n\n默认只删除本地收藏夹归属。勾选后${taskDeletionMessage(collectionTasks)}`
+        : `确定要删除收藏夹「${collection.name}」吗？默认只删除本地收藏夹归属。`,
       checkbox: imageCount > 0
         ? {
             label: `同时删除收藏夹中的图片（${imageCount} 张）`,
             tone: 'danger',
           }
         : undefined,
-      action: (deleteImages = false) => {
-        void deleteFavoriteCollection(collection.id, deleteImages)
+      awaitAction: true,
+      action: async (deleteImages = false) => {
+        const latest = useStore.getState()
+        const latestTasks = getCollectionTasks(collection.id, latest.tasks, latest.defaultFavoriteCollectionId)
+        if (taskDeletionSignature(latestTasks) !== signature) {
+          latest.showToast('删除范围已变化，请重新确认', 'info')
+          handleDelete(collection, latestTasks)
+          return false
+        }
+        try {
+          await deleteFavoriteCollection(collection.id, deleteImages)
+          return true
+        } catch (err) {
+          console.error(err)
+          useStore.getState().showToast('删除收藏夹失败', 'error')
+          return false
+        }
       },
     })
   }

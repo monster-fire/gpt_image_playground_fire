@@ -4,7 +4,7 @@ import { normalizeBaseUrl } from '../lib/api'
 import { customProviderSupportsNativeTransparentBackground } from '../lib/customProviderCapabilities'
 import { hasActiveDataOperations } from '../lib/dataOperations'
 import { isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig } from '../lib/devProxy'
-import { useStore, exportData, importData, clearData, type SettingsTab } from '../store'
+import { useStore, exportData, importData, clearData, submitApiTest, type SettingsTab } from '../store'
 import {
   createDefaultOpenAIProfile,
   DEFAULT_FAL_BASE_URL,
@@ -48,6 +48,7 @@ import {
   DEFAULT_CUSTOM_PROVIDER_JSON,
 } from '../lib/settingsCustomProvider'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { DEFAULT_DROPDOWN_MAX_HEIGHT, getDropdownMaxHeight } from '../lib/dropdown'
 import Select from './Select'
@@ -61,6 +62,12 @@ import CustomProviderModal from './settings/CustomProviderModal'
 import ProfileImportUrlModal, { type CopyImportUrlOptions } from './settings/ProfileImportUrlModal'
 import ZipDownloadRouteModal, { ZIP_DOWNLOAD_ROUTE_OPTIONS } from './settings/ZipDownloadRouteModal'
 import MarkdownRenderer from './MarkdownRenderer'
+import { apiDraftSnapshot, consumeApiSessionDraft, mergeApiDraft, mergePreferenceDraft, saveApiSessionDraft, validateApiDraft } from '../lib/settingsDraft'
+import { loadNasSettings, saveNasSettings } from '../lib/nasConfig'
+import ApiConfigCheck from './settings/ApiConfigCheck'
+import LocalStoragePanel from './LocalStoragePanel'
+import PromptPresetManager from './PromptPresetManager'
+import BackupPanel from './BackupPanel'
 
 function newId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -167,10 +174,8 @@ export default function SettingsModal() {
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const showToast = useStore((s) => s.showToast)
   const hasRunningOperations = useStore((s) => hasActiveDataOperations(s.tasks, s.agentConversations))
-  const importInputRef = useRef<HTMLInputElement>(null)
   const profileMenuRef = useRef<HTMLDivElement>(null)
   const profileMenuTriggerRef = useRef<HTMLButtonElement>(null)
-  const dataTransferToastAtRef = useRef(0)
 
   const profileImportUrlTooltipTimerRef = useRef<number | null>(null)
   const duplicateProfileTooltipTimerRef = useRef<number | null>(null)
@@ -179,6 +184,15 @@ export default function SettingsModal() {
   const zipDownloadRouteScrollBoundaryRef = useRef<HTMLDivElement>(null)
   
   const [draft, setDraft] = useState<AppSettings>(normalizeSettings(settings))
+  const [savedDraft, setSavedDraft] = useState(apiDraftSnapshot(settings))
+  const [savingConfig, setSavingConfig] = useState(false)
+  const [configError, setConfigError] = useState('')
+  const [configChecked, setConfigChecked] = useState(false)
+  const [showPromptPresets, setShowPromptPresets] = useState(false)
+  const [remoteConfig, setRemoteConfig] = useState<AppSettings | null>(null)
+  const [showRemoteConfig, setShowRemoteConfig] = useState(false)
+  const draftErrors = validateApiDraft(draft)
+  const configDirty = apiDraftSnapshot(draft) !== savedDraft
   const [timeoutInput, setTimeoutInput] = useState(String(getActiveApiProfile(settings).timeout))
   const [agentMaxToolRoundsInput, setAgentMaxToolRoundsInput] = useState(String(settings.agentMaxToolRounds))
   const [showApiKey, setShowApiKey] = useState(false)
@@ -192,14 +206,9 @@ export default function SettingsModal() {
   const [profileImportUrlTooltipVisible, setProfileImportUrlTooltipVisible] = useState(false)
   const [duplicateProfileTooltipVisible, setDuplicateProfileTooltipVisible] = useState(false)
   const [activeTab, setActiveTab] = useState<SettingsTab>('api')
-  const [exportConfig, setExportConfig] = useState(true)
-  const [exportTasks, setExportTasks] = useState(true)
-  const [importConfig, setImportConfig] = useState(true)
-  const [importTasks, setImportTasks] = useState(true)
-  const [clearConfig, setClearConfig] = useState(true)
+  const [clearConfig, setClearConfig] = useState(false)
   const [clearTasks, setClearTasks] = useState(true)
-  const [isExportingData, setIsExportingData] = useState(false)
-  const [isImportingData, setIsImportingData] = useState(false)
+  const [dataTransferBusy, setDataTransferBusy] = useState(false)
   const [isImportingJson, setIsImportingJson] = useState(false)
   const [draggedProfileId, setDraggedProfileId] = useState<string | null>(null)
   const [dragOverProfileId, setDragOverProfileId] = useState<string | null>(null)
@@ -323,9 +332,11 @@ export default function SettingsModal() {
     const displaySettings = normalizedSettings.reuseTaskApiProfileTemporarily && reusedTaskApiProfileId && normalizedSettings.profiles.some((profile) => profile.id === reusedTaskApiProfileId)
       ? normalizeSettings({ ...normalizedSettings, activeProfileId: reusedTaskApiProfileId })
       : normalizedSettings
+    const sessionDraft = consumeApiSessionDraft(displaySettings)
+    const draftSource = sessionDraft ?? displaySettings
     const nextDraft = normalizeSettings({
-      ...displaySettings,
-      profiles: displaySettings.profiles.map((profile) => ({
+      ...draftSource,
+      profiles: draftSource.profiles.map((profile) => ({
         ...profile,
         apiProxy: isProfileApiProxyEligible(displaySettings, profile) && apiProxyAvailable
           ? (apiProxyLocked || profile.apiProxy)
@@ -333,9 +344,22 @@ export default function SettingsModal() {
       })),
     })
     setDraft(nextDraft)
+    setSavedDraft(apiDraftSnapshot(nextDraft))
+    setConfigError('')
+    setConfigChecked(false)
+    setRemoteConfig(null)
+    setShowRemoteConfig(false)
     setTimeoutInput(String(getActiveApiProfile(nextDraft).timeout))
     setAgentMaxToolRoundsInput(String(nextDraft.agentMaxToolRounds))
   }, [apiProxyAvailable, apiProxyLocked, showSettings, settings, reusedTaskApiProfileId])
+
+  useEffect(() => {
+    const preserveDraft = () => {
+      if (configDirty) saveApiSessionDraft(draft, settings)
+    }
+    window.addEventListener('nas-session-expired', preserveDraft)
+    return () => window.removeEventListener('nas-session-expired', preserveDraft)
+  }, [configDirty, draft, settings])
 
   useEffect(() => {
     setTimeoutInput(String(activeProfile.timeout))
@@ -441,7 +465,93 @@ export default function SettingsModal() {
         : (normalizedProfiles[0]?.id ?? fallbackProfile.id),
     })
     setDraft(normalizedDraft)
-    setSettings(normalizedDraft)
+    setSettings(mergePreferenceDraft(normalizedDraft, useStore.getState().settings))
+    setConfigChecked(false)
+  }
+
+  const checkConfigDraft = () => {
+    setConfigChecked(true)
+    setConfigError('')
+  }
+
+  const commitConfigSave = async () => {
+    if (savingConfig) return false
+    const errors = validateApiDraft(draft)
+    setConfigChecked(true)
+    if (Object.keys(errors).length) { setConfigError('请修正配置字段后保存'); return false }
+    setSavingConfig(true)
+    setConfigError('')
+    try {
+      const next = mergeApiDraft(draft, useStore.getState().settings)
+      if (isNasAuthEnabled()) await saveNasSettings(next, { blockUsageOnFailure: false })
+      setSettings(next)
+      setDraft(next)
+      setSavedDraft(apiDraftSnapshot(next))
+      setRemoteConfig(null)
+      setShowRemoteConfig(false)
+      showToast(isNasAuthEnabled() ? '配置已保存到 NAS' : '配置已保存', 'success')
+      return true
+    } catch (error) {
+      setConfigError(error instanceof Error ? error.message : '配置保存失败')
+      return false
+    } finally { setSavingConfig(false) }
+  }
+
+  const saveConfig = async () => {
+    if (remoteConfig && configDirty) {
+      setConfirmDialog({
+        title: '覆盖服务器配置',
+        message: '服务器配置已重新读取，当前草稿与服务器版本不同。继续保存会用当前草稿覆盖服务器上的 API 配置。',
+        confirmText: '用当前草稿覆盖服务器',
+        awaitAction: true,
+        action: commitConfigSave,
+      })
+      return false
+    }
+    return commitConfigSave()
+  }
+
+  const useActiveDraftProfile = async () => {
+    const latest = useStore.getState().settings
+    if (!latest.profiles.some((profile) => profile.id === activeProfile.id)) {
+      setConfigError('请先保存此配置，再设为当前使用')
+      return false
+    }
+    const next = normalizeSettings({ ...latest, activeProfileId: activeProfile.id })
+    setSavingConfig(true)
+    try {
+      if (isNasAuthEnabled()) await saveNasSettings(next, { blockUsageOnFailure: false })
+      setSettings(next)
+      setSavedDraft(apiDraftSnapshot(draft))
+      return true
+    } catch (error) {
+      setConfigError(error instanceof Error ? error.message : '配置切换失败')
+      return false
+    } finally { setSavingConfig(false) }
+  }
+
+  const reloadNasConfig = async () => {
+    if (savingConfig) return false
+    setSavingConfig(true)
+    try {
+      const loaded = await loadNasSettings(useStore.getState().settings)
+      setSettings(loaded)
+      if (!configDirty) {
+        setDraft(loaded)
+        setSavedDraft(apiDraftSnapshot(loaded))
+        setRemoteConfig(null)
+        setShowRemoteConfig(false)
+        setConfigError('')
+      } else {
+        setRemoteConfig(loaded)
+        setShowRemoteConfig(true)
+        setConfigError('已读取服务器配置，本次草稿仍保留；再次保存前请核对服务器版本')
+      }
+      return true
+    } catch (error) {
+      setConfigError(error instanceof Error ? error.message : '读取失败')
+      return false
+    } finally { setSavingConfig(false) }
   }
 
   const setZipDownloadRouteEnabled = (route: ZipDownloadRoute, enabled: boolean) => {
@@ -529,40 +639,30 @@ export default function SettingsModal() {
     if (commit) commitSettings(nextDraft)
   }
 
-  const commitActiveProfilePatch = (patch: Partial<ApiProfile>) => {
-    if (activeProfileLocked && (Object.keys(patch).length !== 1 || patch.apiKey === undefined)) return
-    const nextDraft = getDraftWithActiveProfilePatch(patch)
-    commitSettings(nextDraft)
+  const updateApiDraft = (nextDraft: AppSettings) => {
+    const normalizedDraft = normalizeSettings(nextDraft)
+    setDraft(normalizedDraft)
+    setTimeoutInput(String(getActiveApiProfile(normalizedDraft).timeout))
+    setConfigChecked(false)
   }
 
   const handleClose = () => {
-    if (isExportingData || isImportingData) {
-      showDataTransferBusyToast()
+    if (savingConfig) return
+    if (dataTransferBusy) {
+      showToast('请等待数据操作完成，或停止后续操作', 'info')
       return
     }
     if (showZipDownloadRouteManager) {
       setShowZipDownloadRouteManager(false)
       return
     }
-    const nextTimeout = Number(timeoutInput)
-    const normalizedTimeout =
-      timeoutInput.trim() === '' || Number.isNaN(nextTimeout)
-        ? DEFAULT_SETTINGS.timeout
-        : nextTimeout
-    const normalizedAgentMaxToolRounds = agentMaxToolRoundsInput.trim() === ''
-      ? DEFAULT_AGENT_MAX_TOOL_ROUNDS
-      : normalizeAgentMaxToolRounds(agentMaxToolRoundsInput, draft.agentMaxToolRounds)
-    const nextDraft = {
-      ...draft,
-      agentMaxToolRounds: normalizedAgentMaxToolRounds,
-      profiles: activeProviderIsOpenAICompatible && !activeProfileLocked
-        ? draft.profiles.map((profile) =>
-            profile.id === activeProfile.id ? { ...profile, timeout: normalizedTimeout } : profile,
-          )
-        : draft.profiles,
+    if (configDirty) {
+      setConfirmDialog({ title: '配置尚未保存', message: '保存修改，或放弃本次编辑？', cancelText: '继续编辑', buttons: [
+        { label: '放弃修改', action: () => setShowSettings(false) },
+        { label: '保存并关闭', tone: 'primary', action: async () => { if (!await saveConfig()) return false; setShowSettings(false) } },
+      ] })
+      return
     }
-    setAgentMaxToolRoundsInput(String(normalizedAgentMaxToolRounds))
-    commitSettings(nextDraft)
     setShowSettings(false)
   }
 
@@ -610,84 +710,14 @@ export default function SettingsModal() {
     }
   }
 
-  const dataTransferMode = isExportingData ? 'export' : isImportingData ? 'import' : null
-  const showDataTransferBusyToast = () => {
-    const now = Date.now()
-    if (now - dataTransferToastAtRef.current < 1000) return
-    dataTransferToastAtRef.current = now
-    showToast(dataTransferMode === 'export' ? '正在导出中，请稍候' : '正在导入中，请稍候', 'info')
-  }
-
-  useEffect(() => {
-    dataTransferToastAtRef.current = 0
-    if (!dataTransferMode) return
-    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
-    const preventKeyDown = (e: KeyboardEvent) => {
-      e.preventDefault()
-      e.stopImmediatePropagation()
-      showDataTransferBusyToast()
-    }
-    window.addEventListener('keydown', preventKeyDown, true)
-    return () => window.removeEventListener('keydown', preventKeyDown, true)
-  }, [dataTransferMode, showToast])
-
-  const blockDataTransferInteraction = (e: React.SyntheticEvent) => {
-    if (!dataTransferMode) return
-    e.preventDefault()
-    e.stopPropagation()
-    showDataTransferBusyToast()
-  }
-
-  const blockDataTransferClick = (e: React.SyntheticEvent) => {
-    if (!dataTransferMode) return
-    e.preventDefault()
-    e.stopPropagation()
-  }
-
-  useCloseOnEscape(showSettings && !dataTransferMode, handleClose)
+  useCloseOnEscape(showSettings, handleClose)
+  useDialogFocus(showSettings, settingsScrollBoundaryRef)
   usePreventBackgroundScroll(showSettings, showZipDownloadRouteManager ? zipDownloadRouteScrollBoundaryRef : showCustomProviderImport ? customProviderScrollBoundaryRef : settingsScrollBoundaryRef)
 
   if (!showSettings) return null
 
-  const handleExport = async () => {
-    if (exportTasks && hasRunningOperations) {
-      showToast('当前有任务正在进行，请完成或停止后再导出', 'error')
-      return
-    }
-    setIsExportingData(true)
-    try {
-      await exportData({ exportConfig, exportTasks })
-    } finally {
-      setIsExportingData(false)
-    }
-  }
-
-  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? [])
-    if (files.length) {
-      if (importTasks && hasRunningOperations) {
-        showToast('当前有任务正在进行，请完成或停止后再导入', 'error')
-        e.target.value = ''
-        return
-      }
-      setIsImportingData(true)
-      try {
-        const imported = await importData(files, { importConfig: presetConfigOnly ? false : importConfig, importTasks })
-        if (imported) {
-          const nextDraft = normalizeSettings(useStore.getState().settings)
-          setDraft(nextDraft)
-          setTimeoutInput(String(getActiveApiProfile(nextDraft).timeout))
-          setShowProfileMenu(false)
-        }
-      } finally {
-        setIsImportingData(false)
-      }
-    }
-    e.target.value = ''
-  }
-
   const handleClearAllData = async () => {
-    await clearData({ clearConfig, clearTasks })
+    await clearData({ clearPreferences: clearConfig, clearTasks })
     const nextDraft = normalizeSettings(useStore.getState().settings)
     setDraft(nextDraft)
     setTimeoutInput(String(getActiveApiProfile(nextDraft).timeout))
@@ -703,7 +733,7 @@ export default function SettingsModal() {
         profiles: [...draft.profiles, profile],
         activeProfileId: profile.id
     })
-    commitSettings(nextDraft)
+    updateApiDraft(nextDraft)
     setShowProfileMenu(false)
   }
 
@@ -741,7 +771,7 @@ export default function SettingsModal() {
       profiles: [...draft.profiles, profile],
       activeProfileId: profile.id,
     })
-    commitSettings(nextDraft)
+    updateApiDraft(nextDraft)
     setShowProfileMenu(false)
   }
 
@@ -749,7 +779,7 @@ export default function SettingsModal() {
     if (presetConfigOnly && !presetProfileIds.has(id)) return
     setReusedTaskApiProfile(null)
     const nextDraft = normalizeSettings({ ...draft, activeProfileId: id })
-    commitSettings(nextDraft)
+    updateApiDraft(nextDraft)
     setShowProfileMenu(false)
   }
   
@@ -811,7 +841,7 @@ export default function SettingsModal() {
     newProfiles.splice(newTargetIndex, 0, removed)
 
     const nextDraft = normalizeSettings({ ...draft, profiles: newProfiles })
-    commitSettings(nextDraft)
+    updateApiDraft(nextDraft)
   }
 
   const handleProfileDrop = (e: React.DragEvent, targetId: string) => {
@@ -903,7 +933,7 @@ export default function SettingsModal() {
       profiles: nextProfiles,
       activeProfileId: draft.activeProfileId === id ? nextProfiles[0].id : draft.activeProfileId,
     })
-    commitSettings(nextDraft)
+    updateApiDraft(nextDraft)
   }
 
   const handleProviderReorder = (sourceValue: string | number, targetValue: string | number, position: 'before' | 'after' | null) => {
@@ -922,7 +952,7 @@ export default function SettingsModal() {
     newOrder.splice(newTargetIndex, 0, removed)
 
     const nextDraft = normalizeSettings({ ...draft, providerOrder: newOrder })
-    commitSettings(nextDraft)
+    updateApiDraft(nextDraft)
   }
 
   const handleProviderTypeChange = (value: string | number) => {
@@ -989,7 +1019,7 @@ export default function SettingsModal() {
             provider.id === editingCustomProviderId ? customProvider : provider,
           ),
         })
-        commitSettings(nextDraft)
+        updateApiDraft(nextDraft)
         setShowCustomProviderImport(false)
         setEditingCustomProviderId(null)
         setCustomProviderImportError(null)
@@ -1004,7 +1034,7 @@ export default function SettingsModal() {
         profiles: draft.profiles.map((profile) => profile.id === activeProfile.id ? nextProfile : profile),
       })
       restorePresetProvider(customProvider.id)
-      commitSettings(nextDraft)
+      updateApiDraft(nextDraft)
       setShowCustomProviderImport(false)
       setEditingCustomProviderId(null)
       setCustomProviderImportError(null)
@@ -1033,7 +1063,7 @@ export default function SettingsModal() {
         profile.provider === providerId ? switchApiProfileProvider(profile, 'openai') : profile,
       ),
     })
-    commitSettings(nextDraft)
+    updateApiDraft(nextDraft)
     showToast('服务商已删除', 'success')
   }
 
@@ -1072,8 +1102,7 @@ export default function SettingsModal() {
               activeProfileId: importedProfile.id,
             })
         for (const provider of imported.customProviders) restorePresetProvider(provider.id)
-        setDraft(nextDraft)
-        setSettings(nextDraft)
+        updateApiDraft(nextDraft)
         setTimeoutInput(String(getActiveApiProfile(nextDraft).timeout))
         setShowCustomProviderImport(false)
         setEditingCustomProviderId(null)
@@ -1108,22 +1137,47 @@ export default function SettingsModal() {
         <div
           data-no-drag-select
           className="fixed inset-0 z-[70] flex items-center justify-center p-4"
-          onPointerDownCapture={blockDataTransferInteraction}
-          onClickCapture={blockDataTransferClick}
-          onContextMenuCapture={blockDataTransferInteraction}
         >
+      <PromptPresetManager open={showPromptPresets} onClose={() => setShowPromptPresets(false)} />
       <div
         className="absolute inset-0 bg-black/30 backdrop-blur-sm animate-overlay-in"
         onClick={handleClose}
       />
       <div
         ref={settingsScrollBoundaryRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-modal-title"
+        tabIndex={-1}
         className="relative z-10 w-full max-w-3xl rounded-3xl border border-white/50 bg-white/95 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10 flex h-[85vh] sm:h-[600px] flex-col overflow-hidden"
       >
         {/* Header */}
-        {isNasAuthEnabled() && <NasConfigStatus />}
+        {isNasAuthEnabled() && <NasConfigStatus busy={savingConfig} onRetrySave={saveConfig} onReload={reloadNasConfig} />}
+        <div className="shrink-0 px-5 py-2 border-b border-gray-200 dark:border-gray-700 flex flex-wrap items-center gap-3 text-sm">
+          <span role="status">{savingConfig ? '正在保存配置…' : configDirty ? '配置有未保存修改' : '配置已保存'}</span>
+          <button disabled={savingConfig || !configDirty} onClick={() => void saveConfig()} className="min-h-11 text-blue-600 disabled:opacity-40">保存配置</button>
+          <button disabled={savingConfig || settings.activeProfileId === activeProfile.id} onClick={() => void useActiveDraftProfile()} className="min-h-11 text-blue-600 disabled:opacity-40">使用此配置</button>
+          <button disabled={savingConfig} onClick={checkConfigDraft} className="min-h-11 text-blue-600">检查格式</button>
+          <button disabled={savingConfig} onClick={() => setShowPromptPresets(true)} className="min-h-11 text-blue-600">提示词预设</button>
+          <button disabled={savingConfig || configDirty} className="min-h-11 text-blue-600 disabled:opacity-40" onClick={() => setConfirmDialog({
+            title: '实际生图测试', message: `使用已保存配置「${activeProfile.name}」及模型 ${activeProfile.model} 生成一张测试图片，可能计费。结果进入画廊，当前输入保持不变。`,
+            confirmText: '生成测试图片', awaitAction: true, action: async () => { await submitApiTest(activeProfile.id) },
+          })}>生图测试（可能计费）</button>
+          {isNasAuthEnabled() && <button disabled={savingConfig} className="min-h-11 text-blue-600" onClick={() => void reloadNasConfig()}>重新读取</button>}
+          {remoteConfig && <button disabled={savingConfig} className="min-h-11 text-blue-600" onClick={() => setShowRemoteConfig((value) => !value)}>{showRemoteConfig ? '隐藏服务器版本' : '查看服务器版本'}</button>}
+          {configError && <p role="alert" className="w-full text-red-600 break-words">{configError}</p>}
+          {configChecked && <p role="status" className="w-full">{Object.values(draftErrors)[0] || '格式有效；连接、鉴权及模型能力未验证'}</p>}
+          {remoteConfig && showRemoteConfig && (() => {
+            const remoteProfile = remoteConfig.profiles.find((profile) => profile.id === remoteConfig.activeProfileId) ?? remoteConfig.profiles[0]
+            return <div data-testid="remote-api-config" className="w-full rounded-xl border border-yellow-200 bg-yellow-50 px-3 py-2 text-xs text-yellow-900 dark:border-yellow-500/30 dark:bg-yellow-500/10 dark:text-yellow-100">
+              <div className="font-medium">服务器当前版本</div>
+              <div>当前配置：{remoteProfile ? `${remoteProfile.name} · ${remoteProfile.baseUrl || '未填写 URL'} · ${remoteProfile.model}` : '无可用配置'}</div>
+              <div>继续保存会用当前草稿覆盖服务器 API 配置。</div>
+            </div>
+          })()}
+        </div>
         <div className="flex items-center justify-between shrink-0 p-5 border-b border-gray-100 dark:border-white/[0.08]">
-          <h3 className="text-lg font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
+          <h3 id="settings-modal-title" className="text-lg font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
             <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -1134,7 +1188,9 @@ export default function SettingsModal() {
             <span className="text-sm text-gray-400 dark:text-gray-500 font-mono select-none">v{__APP_VERSION__}</span>
             <button
               onClick={handleClose}
-              className="rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
+              disabled={savingConfig}
+              data-autofocus
+              className="rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 disabled:opacity-40 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
               aria-label="关闭"
             >
               <CloseIcon className="h-5 w-5" />
@@ -1147,6 +1203,7 @@ export default function SettingsModal() {
           <div className="w-full sm:w-48 shrink-0 flex flex-col border-b sm:border-b-0 sm:border-r border-gray-100 dark:border-white/[0.08] bg-gray-50/50 dark:bg-white/[0.02]">
             <nav className="flex-1 overflow-x-auto sm:overflow-y-auto custom-scrollbar p-3 space-x-1 sm:space-x-0 sm:space-y-1 flex sm:flex-col">
               <button
+                disabled={savingConfig}
                 onClick={() => setActiveTab('api')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'api' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1156,6 +1213,7 @@ export default function SettingsModal() {
                 API 配置
               </button>
               <button
+                disabled={savingConfig}
                 onClick={() => setActiveTab('general')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'general' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1165,6 +1223,7 @@ export default function SettingsModal() {
                 习惯配置
               </button>
               <button
+                disabled={savingConfig}
                 onClick={() => setActiveTab('agent')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'agent' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1176,6 +1235,7 @@ export default function SettingsModal() {
                 Agent 配置
               </button>
               <button
+                disabled={savingConfig}
                 onClick={() => setActiveTab('data')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'data' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1185,6 +1245,7 @@ export default function SettingsModal() {
                 数据管理
               </button>
               <button
+                disabled={savingConfig}
                 onClick={() => setActiveTab('about')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'about' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1197,7 +1258,7 @@ export default function SettingsModal() {
           </div>
 
           {/* Content */}
-          <div className="flex-1 flex flex-col min-w-0 min-h-0 bg-transparent relative overflow-hidden">
+          <div inert={savingConfig || undefined} className="flex-1 flex flex-col min-w-0 min-h-0 bg-transparent relative overflow-hidden">
             <div className="flex-1 overflow-y-auto overscroll-contain custom-scrollbar p-5 sm:p-6">
             {activeTab === 'general' && (
               <GeneralSettingsTab
@@ -1226,6 +1287,7 @@ export default function SettingsModal() {
             
             {activeTab === 'api' && (
               <div className="space-y-4">
+              <ApiConfigCheck key={JSON.stringify(activeProfile)} profile={activeProfile} />
                 <div>
                   <div className="mb-1.5 flex items-center gap-1.5">
                     <span className="block text-sm text-gray-600 dark:text-gray-300">当前配置</span>
@@ -1388,7 +1450,7 @@ export default function SettingsModal() {
                                   </button>
                                   {!presetConfigOnly && (isDefaultProfile || draft.profiles.length > 1) && (
                                     <TooltipButton
-                                      tooltip={isPresetProfile && presetDeletionPrevented ? '预置配置不可删除' : '删除配置'}
+                                      tooltip={isPresetProfile && presetDeletionPrevented ? '预置配置不可删除' : `删除配置「${profile.name}」`}
                                       disabled={isPresetProfile && presetDeletionPrevented}
                                       showOnClick={isPresetProfile && presetDeletionPrevented}
                                       stopPropagation
@@ -1431,7 +1493,7 @@ export default function SettingsModal() {
                 <input
                   value={activeProfile.name}
                   onChange={(e) => updateActiveProfile({ name: e.target.value })}
-                  onBlur={(e) => commitActiveProfilePatch({ name: e.target.value })}
+                  onBlur={checkConfigDraft}
                   type="text"
                   disabled={activeProfileLocked}
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
@@ -1459,13 +1521,15 @@ export default function SettingsModal() {
                   </div>
                   <input
                     value={activeProfile.baseUrl}
+                    aria-invalid={Boolean(draftErrors[`${activeProfile.id}:baseUrl`])}
                     onChange={(e) => updateActiveProfile({ baseUrl: e.target.value })}
-                    onBlur={(e) => commitActiveProfilePatch({ baseUrl: e.target.value })}
+                    onBlur={checkConfigDraft}
                     type="text"
                     disabled={apiProxyEnabled || activeProfileLocked}
                     placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_BASE_URL : DEFAULT_SETTINGS.baseUrl}
                     className={`w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50 ${apiProxyEnabled ? 'opacity-50 cursor-not-allowed' : ''}`}
                   />
+                  {draftErrors[`${activeProfile.id}:baseUrl`] && <p role="alert" className="mt-1 text-xs text-red-600">{draftErrors[`${activeProfile.id}:baseUrl`]}</p>}
                   <div data-selectable-text className="mt-1.5 min-h-[22px] flex items-center text-xs text-gray-500 dark:text-gray-500">
                     {apiProxyEnabled ? (
                       <span className="text-yellow-600 dark:text-yellow-500">已开启代理，实际请求目标由部署端决定，此处设置被忽略。</span>
@@ -1510,7 +1574,7 @@ export default function SettingsModal() {
                   <input
                     value={activeProfile.apiKey}
                     onChange={(e) => updateActiveProfile({ apiKey: e.target.value })}
-                    onBlur={(e) => commitActiveProfilePatch({ apiKey: e.target.value })}
+                    onBlur={checkConfigDraft}
                     type={showApiKey ? 'text' : 'password'}
                     placeholder={activeProfile.provider === 'fal' ? 'FAL_KEY' : 'sk-...'}
                     className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 pr-10 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
@@ -1572,7 +1636,7 @@ export default function SettingsModal() {
                 <input
                   value={activeProfile.model}
                   onChange={(e) => updateActiveProfile({ model: e.target.value })}
-                  onBlur={(e) => commitActiveProfilePatch({ model: e.target.value })}
+                  onBlur={checkConfigDraft}
                   type="text"
                   disabled={activeProfileLocked}
                   placeholder={activeProfile.provider === 'fal' ? DEFAULT_FAL_MODEL : getDefaultModelForMode(activeProfile.apiMode ?? DEFAULT_SETTINGS.apiMode)}
@@ -1604,7 +1668,7 @@ export default function SettingsModal() {
                   <input
                     value={activeProfile.imageGenerationModel ?? ''}
                     onChange={(e) => updateActiveProfile({ imageGenerationModel: e.target.value })}
-                    onBlur={(e) => commitActiveProfilePatch({ imageGenerationModel: e.target.value })}
+                    onBlur={checkConfigDraft}
                     type="text"
                     disabled={activeProfileLocked}
                     placeholder={DEFAULT_IMAGES_MODEL}
@@ -1779,96 +1843,8 @@ export default function SettingsModal() {
             
             {activeTab === 'data' && (
               <div className="space-y-4">
-                <div className="rounded-2xl bg-gray-50/80 p-4 border border-gray-200/60 dark:bg-white/[0.02] dark:border-white/[0.05] flex items-start gap-3">
-                  <svg className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                  </svg>
-                  <div className="text-[13px] leading-relaxed text-gray-500 dark:text-gray-400">
-                    所有的配置、任务和生成的图片均仅保存在您的浏览器本地（除非您使用的服务商存储了它们）。如果您需要清理浏览器站点数据、重置浏览器或使用其他设备，请先导出备份。
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/[0.06] dark:bg-white/[0.02] space-y-4 shadow-sm">
-                  <div className="flex items-center gap-2 mb-1">
-                    <ExportIcon className="w-4 h-4 text-gray-700 dark:text-gray-300" />
-                    <h4 className="text-sm font-bold text-gray-800 dark:text-gray-100">导出数据</h4>
-                  </div>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">受浏览器文件大小限制，过大的备份将自动分片导出，请允许浏览器下载多个文件</p>
-                  <div className="flex flex-wrap gap-x-6 gap-y-3">
-                    <Checkbox
-                      checked={exportConfig}
-                      onChange={setExportConfig}
-                      label="包含配置"
-                    />
-                    <Checkbox
-                      checked={exportTasks}
-                      onChange={setExportTasks}
-                      label="包含任务和图片"
-                    />
-                  </div>
-                  <button
-                    onClick={handleExport}
-                    disabled={(!exportConfig && !exportTasks) || isExportingData}
-                    className="w-full rounded-xl bg-gray-100/80 px-4 py-2.5 text-sm font-medium text-gray-700 transition-all hover:bg-gray-200 hover:text-gray-900 disabled:opacity-50 disabled:hover:bg-gray-100/80 disabled:hover:text-gray-700 dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/[0.1] dark:hover:text-white dark:disabled:hover:bg-white/[0.06] dark:disabled:hover:text-gray-300 flex items-center justify-center gap-2"
-                  >
-                    {isExportingData ? (
-                      <>
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        导出中...
-                      </>
-                    ) : (
-                      '导出所选数据'
-                    )}
-                  </button>
-                </div>
-
-                <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/[0.06] dark:bg-white/[0.02] space-y-4 shadow-sm">
-                  <div className="flex items-center gap-2 mb-1">
-                    <ImportIcon className="w-4 h-4 text-gray-700 dark:text-gray-300" />
-                    <h4 className="text-sm font-bold text-gray-800 dark:text-gray-100">导入数据</h4>
-                  </div>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">支持一次导入多个普通备份；分片备份请一次性选中同一批次的全部分片</p>
-                  <div className="flex flex-wrap gap-x-6 gap-y-3">
-                    {!presetConfigOnly && <Checkbox
-                      checked={importConfig}
-                      onChange={setImportConfig}
-                      label="包含配置"
-                    />}
-                    <Checkbox
-                      checked={importTasks}
-                      onChange={setImportTasks}
-                      label="包含任务和图片"
-                    />
-                  </div>
-                  <button
-                    onClick={() => importInputRef.current?.click()}
-                    disabled={(!(presetConfigOnly ? false : importConfig) && !importTasks) || isImportingData}
-                    className="w-full rounded-xl bg-gray-100/80 px-4 py-2.5 text-sm font-medium text-gray-700 transition-all hover:bg-gray-200 hover:text-gray-900 disabled:opacity-50 disabled:hover:bg-gray-100/80 disabled:hover:text-gray-700 dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/[0.1] dark:hover:text-white dark:disabled:hover:bg-white/[0.06] dark:disabled:hover:text-gray-300 flex items-center justify-center gap-2"
-                  >
-                    {isImportingData ? (
-                      <>
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        导入中...
-                      </>
-                    ) : (
-                      '从 ZIP 导入所选数据'
-                    )}
-                  </button>
-                  <input
-                    ref={importInputRef}
-                    type="file"
-                    accept=".zip"
-                    multiple
-                    className="hidden"
-                    onChange={handleImport}
-                  />
-                </div>
+                <LocalStoragePanel />
+                <BackupPanel onBusyChange={setDataTransferBusy} />
 
                 <div className="rounded-2xl border border-red-100/50 bg-red-50/30 p-4 dark:border-red-500/10 dark:bg-red-500/5 space-y-4 shadow-sm">
                   <div className="flex items-center gap-2 mb-1">
@@ -1879,7 +1855,7 @@ export default function SettingsModal() {
                     <Checkbox
                       checked={clearConfig}
                       onChange={setClearConfig}
-                      label="包含配置"
+                      label="清除界面偏好"
                       tone="danger"
                     />
                     <Checkbox
@@ -1892,12 +1868,14 @@ export default function SettingsModal() {
                   <button
                     onClick={() =>
                       setConfirmDialog({
-                        title: '清空所选数据',
-                        message: `确定要清空所选的数据吗？此操作不可恢复。`,
+                        title: '删除本地数据',
+                        message: `${clearTasks ? `删除当前浏览器中的 ${useStore.getState().tasks.length} 个任务、${useStore.getState().agentConversations.length} 个对话、原图、本地收藏关系及输入草稿。` : ''}${clearConfig ? '重置界面偏好。' : '保留界面偏好。'}保留 NAS API 配置、服务器预设及登录会话。此操作不可恢复。`,
+                        requiredText: '清空',
+                        awaitAction: true,
                         action: () => handleClearAllData(),
                       })
                     }
-                    disabled={!clearConfig && !clearTasks}
+                    disabled={hasRunningOperations || (!clearConfig && !clearTasks)}
                     className="w-full rounded-xl bg-red-100/80 px-4 py-2.5 text-sm font-medium text-red-600 transition-all hover:bg-red-200 hover:text-red-700 disabled:opacity-50 disabled:hover:bg-red-100/80 disabled:hover:text-red-600 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20 dark:hover:text-red-300 dark:disabled:hover:bg-red-500/10 dark:disabled:hover:text-red-400"
                   >
                     清空所选数据

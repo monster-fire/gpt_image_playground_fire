@@ -6,12 +6,14 @@ import { dirname, join } from 'node:path'
 import { Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
+import { preparePromptPresetWrite, readPromptPresets, writePromptPresets } from './promptPresets.mjs'
 
 const SESSION_COOKIE = 'gip_session'
 const CSRF_HEADER = 'x-csrf-token'
 const SESSION_TTL_MS = 168 * 60 * 60 * 1000
 const MAX_LOGIN_BODY_BYTES = 16 * 1024
 const MAX_CONFIG_BODY_BYTES = 20 * 1024 * 1024
+const MAX_PRESETS_BODY_BYTES = 12 * 1024 * 1024
 const DEFAULT_PROXY_BODY_BYTES = 700 * 1024 * 1024
 const DEFAULT_PROXY_TIMEOUT_MS = 600 * 1000
 const AUTH_ERROR_CODE = 'APP_SESSION_EXPIRED'
@@ -420,6 +422,7 @@ export async function createApp(opts = {}) {
 
   const dataDir = opts.dataDir ?? process.env.DATA_DIR ?? '/data'
   const apiConfigPath = opts.apiConfigPath ?? process.env.API_CONFIG_PATH ?? '/config/gpt-image-playground.json'
+  const promptPresetsPath = opts.promptPresetsPath ?? process.env.PROMPT_PRESETS_PATH ?? join(dataDir, 'prompt-presets.json')
   const apiProxyUrl = opts.apiProxyUrl || process.env.API_PROXY_URL || 'https://api.openai.com/v1'
   const cookieSecure = opts.cookieSecure ?? process.env.COOKIE_SECURE !== 'false'
   const appOrigins = parseOrigins(opts.appOrigin ?? process.env.APP_ORIGIN)
@@ -430,6 +433,7 @@ export async function createApp(opts = {}) {
   await store.load()
   const limiter = new LoginLimiter()
   const writeConfig = serialize()
+  const writePromptPresetLibrary = serialize()
 
   async function handler(req, res) {
     try {
@@ -511,6 +515,41 @@ export async function createApp(opts = {}) {
         }
       }
 
+      if (url.pathname === '/api/prompt-presets') {
+        const auth = getSession(req, store)
+        if (!auth) return authError(res)
+
+        if (req.method === 'GET') return jsonResponse(res, 200, await readPromptPresets(promptPresetsPath))
+
+        if (req.method === 'PUT') {
+          if (!isSafeSameOrigin(req, appOrigins)) return errorResponse(res, 403, 'APP_BAD_ORIGIN', 'Origin mismatch.')
+          if (!requireCsrf(req, auth.session)) return errorResponse(res, 403, 'APP_CSRF_REJECTED', 'CSRF check failed.')
+          const ifMatch = req.headers['if-match']
+          if (typeof ifMatch !== 'string' || !ifMatch) return errorResponse(res, 428, 'APP_REVISION_REQUIRED', 'If-Match is required.')
+          const body = await readJsonBody(req, MAX_PRESETS_BODY_BYTES)
+          if (!body || typeof body !== 'object' || !('presets' in body)) return errorResponse(res, 400, 'APP_BAD_PRESETS', 'Missing presets.')
+          const result = await writePromptPresetLibrary(async () => {
+            const current = await readPromptPresets(promptPresetsPath)
+            if (ifMatch !== current.revision) {
+              const err = new Error('revision mismatch')
+              err.status = 409
+              throw err
+            }
+            let library
+            try {
+              library = preparePromptPresetWrite(body.presets, current)
+            } catch {
+              const err = new Error('invalid prompt presets')
+              err.status = 422
+              throw err
+            }
+            await writePromptPresets(promptPresetsPath, library)
+            return readPromptPresets(promptPresetsPath)
+          })
+          return jsonResponse(res, 200, result)
+        }
+      }
+
       if (url.pathname.startsWith('/api-proxy/')) {
         const auth = getSession(req, store)
         if (!auth) return authError(res)
@@ -534,6 +573,7 @@ export async function createApp(opts = {}) {
       if (err?.status === 400) return errorResponse(res, 400, 'APP_BAD_REQUEST', 'Bad request.')
       if (err?.status === 409) return errorResponse(res, 409, 'APP_REVISION_MISMATCH', 'Config revision changed.')
       if (err?.status === 413) return errorResponse(res, 413, 'APP_BODY_TOO_LARGE', 'Request body too large.')
+      if (err?.status === 422) return errorResponse(res, 422, 'APP_BAD_PRESETS', 'Invalid prompt presets.')
       if (err?.status === 499 || err?.name === 'AbortError' || err?.code === 'ABORT_ERR') {
         if (!res.headersSent) return errorResponse(res, 499, 'APP_CLIENT_CLOSED', 'Client closed request.')
         return res.destroy()

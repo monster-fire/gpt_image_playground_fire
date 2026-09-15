@@ -15,10 +15,12 @@ interface BuildAgentApiInputOptions {
   currentRound: AgentRound
   tasks: TaskRecord[]
   loadImage: LoadImage
+  onPrepareImages?: (total: number) => void
 }
 
 interface BuildAgentContinuationInputOptions {
   baseInput: unknown[]
+  conversation?: AgentConversation
   currentRound: AgentRound
   tasks: TaskRecord[]
   currentRoundOutput: ResponsesOutputItem[]
@@ -27,6 +29,46 @@ interface BuildAgentContinuationInputOptions {
   toolCallsUsed: number
   maxToolCalls: number
   loadImage: LoadImage
+  onPrepareImages?: (total: number) => void
+}
+
+interface CountAgentInputImagesOptions {
+  conversation: AgentConversation
+  currentRound: AgentRound
+  tasks: TaskRecord[]
+  batchTaskIds?: string[]
+  onPrepareImages?: (total: number) => void
+}
+
+function addRoundInputImages(ids: Set<string>, round: AgentRound) {
+  for (const id of round.inputImageIds) ids.add(id)
+}
+
+function addRoundOutputImages(ids: Set<string>, round: AgentRound, tasks: TaskRecord[]) {
+  for (const taskId of round.outputTaskIds) {
+    const task = tasks.find((item) => item.id === taskId)
+    if (!task || task.status !== 'done') continue
+    for (const imageId of task.outputImages) ids.add(imageId)
+  }
+}
+
+export function collectAgentInputImageIds(options: CountAgentInputImagesOptions): string[] {
+  const ids = new Set<string>()
+  const rounds = getAgentRoundPath(options.conversation, options.currentRound.id)
+  for (const round of rounds) {
+    addRoundInputImages(ids, round)
+    if (round.id !== options.currentRound.id) addRoundOutputImages(ids, round, options.tasks)
+  }
+  if (options.batchTaskIds?.length) {
+    for (const taskId of options.batchTaskIds) {
+      const task = options.tasks.find((item) => item.id === taskId)
+      if (!task || task.status !== 'done') continue
+      for (const imageId of task.outputImages) ids.add(imageId)
+    }
+  }
+  const result = Array.from(ids)
+  options.onPrepareImages?.(result.length)
+  return result
 }
 
 async function createUserInputItem(
@@ -124,6 +166,7 @@ function createAssistantFallbackItem(text: string) {
 }
 
 export async function buildAgentApiInput(options: BuildAgentApiInputOptions): Promise<unknown[]> {
+  if (options.onPrepareImages) collectAgentInputImageIds(options)
   const input: unknown[] = []
   const rounds = getAgentRoundPath(options.conversation, options.currentRound.id)
 
@@ -162,6 +205,15 @@ export async function buildAgentApiInput(options: BuildAgentApiInputOptions): Pr
 }
 
 export async function buildAgentContinuationInput(options: BuildAgentContinuationInputOptions): Promise<unknown[]> {
+  if (options.onPrepareImages && options.conversation) {
+    collectAgentInputImageIds({
+      conversation: options.conversation,
+      currentRound: options.currentRound,
+      tasks: options.tasks,
+      batchTaskIds: options.batchTaskIds,
+      onPrepareImages: options.onPrepareImages,
+    })
+  }
   const functionCallOutputIds = new Set((options.functionCallOutputs ?? [])
     .filter((item) => item.type === 'function_call_output' && item.call_id)
     .map((item) => item.call_id!))

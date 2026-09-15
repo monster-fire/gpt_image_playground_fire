@@ -5,6 +5,7 @@ const canvasImage = vi.hoisted(() => ({
 }))
 const db = vi.hoisted(() => ({
   getAgentContextImage: vi.fn(),
+  getRebuildableCacheEpoch: vi.fn(),
   putAgentContextImageIfSourceMatches: vi.fn(),
 }))
 
@@ -35,6 +36,7 @@ describe('agentContextImages', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     db.getAgentContextImage.mockReset().mockResolvedValue(undefined)
+    db.getRebuildableCacheEpoch.mockReset().mockResolvedValue(7)
     db.putAgentContextImageIfSourceMatches.mockReset().mockResolvedValue(true)
     canvasCalls.length = 0
     blobSizes = []
@@ -82,7 +84,7 @@ describe('agentContextImages', () => {
     const original = dataUrl(900 * 1024)
     db.getAgentContextImage.mockResolvedValue({ id: 'old', dataUrl: 'data:image/webp;base64,old', version: 0 })
     const result = await createAgentContextImageLoader(async () => original)('old')
-    expect(db.putAgentContextImageIfSourceMatches).toHaveBeenCalledWith({ id: 'old', dataUrl: result, version: 1 }, original)
+    expect(db.putAgentContextImageIfSourceMatches).toHaveBeenCalledWith({ id: 'old', dataUrl: result, version: 1 }, original, 7)
     expect(canvasImage.loadImage).toHaveBeenCalledTimes(1)
   })
 
@@ -182,6 +184,58 @@ describe('agentContextImages', () => {
     expect(load).toHaveBeenCalledWith('image-a')
     expect(load).toHaveBeenCalledWith('missing')
     expect(canvasImage.loadImage).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports cache checks, cache hits, and processed image counts', async () => {
+    blobSizes = [blobToDataUrlSize(220 * 1024)]
+    const progress = vi.fn()
+    db.getAgentContextImage.mockImplementation(async (id: string) =>
+      id === 'cached'
+        ? { id, dataUrl: 'data:image/webp;base64,cached', version: 1 }
+        : undefined,
+    )
+    const load = vi.fn(async (id: string) => id === 'missing' ? undefined : dataUrl(900 * 1024))
+    const loadContextImage = createAgentContextImageLoader(load, undefined, { total: 3, onProgress: progress })
+
+    await expect(loadContextImage('cached')).resolves.toBe('data:image/webp;base64,cached')
+    await expect(loadContextImage('new')).resolves.toMatch(/^data:image\/webp;base64,/)
+    await expect(loadContextImage('missing')).resolves.toBeUndefined()
+
+    expect(progress.mock.calls.map(([value]) => value)).toEqual([
+      { checked: 1, total: 3, processed: 0, cacheHits: 1, currentImageId: 'cached' },
+      { checked: 2, total: 3, processed: 0, cacheHits: 1, currentImageId: 'new' },
+      { checked: 2, total: 3, processed: 1, cacheHits: 1, currentImageId: 'new' },
+      { checked: 3, total: 3, processed: 1, cacheHits: 1, currentImageId: 'missing' },
+    ])
+  })
+
+  it('does not count repeated image ids twice while still checking IndexedDB again', async () => {
+    const progress = vi.fn()
+    db.getAgentContextImage.mockResolvedValue({ id: 'same', dataUrl: 'data:image/webp;base64,cached', version: 1 })
+    const loadContextImage = createAgentContextImageLoader(vi.fn(), undefined, { total: 1, onProgress: progress })
+
+    await expect(loadContextImage('same')).resolves.toBe('data:image/webp;base64,cached')
+    await expect(loadContextImage('same')).resolves.toBe('data:image/webp;base64,cached')
+
+    expect(db.getAgentContextImage).toHaveBeenCalledTimes(2)
+    expect(progress.mock.calls.map(([value]) => value)).toEqual([
+      { checked: 1, total: 1, processed: 0, cacheHits: 1, currentImageId: 'same' },
+    ])
+  })
+
+  it('does not count repeated compressed image ids as processed twice', async () => {
+    blobSizes = [blobToDataUrlSize(220 * 1024), blobToDataUrlSize(220 * 1024)]
+    const progress = vi.fn()
+    db.getAgentContextImage.mockResolvedValue(undefined)
+    const loadContextImage = createAgentContextImageLoader(async () => dataUrl(900 * 1024), undefined, { total: 1, onProgress: progress })
+
+    await expect(loadContextImage('same')).resolves.toMatch(/^data:image\/webp;base64,/)
+    await expect(loadContextImage('same')).resolves.toMatch(/^data:image\/webp;base64,/)
+
+    expect(progress.mock.calls.map(([value]) => value)).toEqual([
+      { checked: 1, total: 1, processed: 0, cacheHits: 0, currentImageId: 'same' },
+      { checked: 1, total: 1, processed: 1, cacheHits: 0, currentImageId: 'same' },
+    ])
   })
 
   it('checks abort before loading and after source image loading', async () => {

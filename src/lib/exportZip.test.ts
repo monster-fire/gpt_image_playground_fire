@@ -196,4 +196,135 @@ describe('exportZip', () => {
     expect(plan).toEqual([{ imageIds: [], tasks: [], agentConversations: [], includeBaseData: true }])
   })
 
+  it('exports API settings, preferences, prompt presets, images and thumbnails independently', async () => {
+    const settings = {
+      profiles: [{ id: 'profile-a', apiKey: 'secret' }],
+      customProviders: [{ id: 'provider-a' }],
+      activeProfileId: 'profile-a',
+      clearInputAfterSubmit: true,
+      enterSubmit: true,
+      prompt: 'local draft',
+    } as unknown as AppSettings
+    const image: StoredImage = {
+      id: 'img-1',
+      dataUrl: 'data:image/png;base64,AAECAw==',
+      source: 'generated',
+    }
+    const thumbnail: StoredImageThumbnail = {
+      id: 'img-1',
+      thumbnailDataUrl: 'data:image/webp;base64,BAUG',
+      width: 16,
+      height: 12,
+      thumbnailVersion: 2,
+    }
+    const result = await buildExportZip({
+      options: {
+        exportConfig: true,
+        exportTasks: false,
+        exportImages: false,
+        exportThumbnails: true,
+        exportPreferences: true,
+        exportPromptPresets: true,
+      },
+      exportedAt: 1700000001000,
+      settings,
+      tasks: [],
+      images: [image],
+      thumbnailsByImageId: new Map([[thumbnail.id, thumbnail]]),
+      favoriteCollections: [],
+      defaultFavoriteCollectionId: null,
+      agentConversations: [],
+      promptPresets: [{ id: 'preset-a', name: '预设', content: '内容' }],
+    })
+    const parsed = await readExportZip(result.bytes)
+
+    expect(parsed.manifest.settings).toEqual({
+      profiles: settings.profiles,
+      customProviders: settings.customProviders,
+      providerOrder: undefined,
+      activeProfileId: 'profile-a',
+      agentApiConfigMode: undefined,
+      agentTextProfileId: undefined,
+      agentImageProfileId: undefined,
+    })
+    expect(parsed.manifest.settings).not.toHaveProperty('clearInputAfterSubmit')
+    expect(parsed.manifest.preferences).toMatchObject({ clearInputAfterSubmit: true, enterSubmit: true })
+    expect(parsed.manifest.preferences).not.toHaveProperty('profiles')
+    expect(parsed.manifest.promptPresets).toEqual([{ id: 'preset-a', name: '预设', content: '内容' }])
+    expect(parsed.manifest.imageFiles).toBeUndefined()
+    expect(Object.keys(parsed.manifest.thumbnailFiles ?? {})).toEqual(['img-1'])
+    expect(readExportZipFileAsDataUrl(parsed.files, parsed.manifest.thumbnailFiles!['img-1'].path)).toBe(thumbnail.thumbnailDataUrl)
+  })
+
+  it('deduplicates thumbnail paths when thumbnails are exported without originals', async () => {
+    const task: TaskRecord = {
+      id: 'task-1',
+      prompt: '提示词',
+      params: {} as TaskParams,
+      inputImageIds: [],
+      outputImages: ['img-1', 'img-2'],
+      status: 'done',
+      error: null,
+      createdAt: 1700000000000,
+      finishedAt: 1700000000001,
+      elapsed: 1,
+    }
+    const images: StoredImage[] = [
+      { id: 'img-1', dataUrl: 'data:image/png;base64,AAECAw==' },
+      { id: 'img-2', dataUrl: 'data:image/png;base64,BAUGBw==' },
+    ]
+    const parsed = await readExportZip((await buildExportZip({
+      options: { exportTasks: true, exportImages: false, exportThumbnails: true },
+      exportedAt: 1700000001000,
+      settings: {} as AppSettings,
+      tasks: [task],
+      imageTasks: [task],
+      images,
+      thumbnailsByImageId: new Map(images.map((image) => [image.id, {
+        id: image.id,
+        thumbnailDataUrl: 'data:image/webp;base64,BAUG',
+        thumbnailVersion: 2,
+      } satisfies StoredImageThumbnail])),
+      favoriteCollections: [],
+      defaultFavoriteCollectionId: null,
+      agentConversations: [],
+    })).bytes)
+
+    expect(Object.values(parsed.manifest.thumbnailFiles ?? {}).map((file) => file.path).sort()).toEqual([
+      'thumbnails/task-task-1-01.webp',
+      'thumbnails/task-task-1-02.webp',
+    ])
+  })
+
+  it('keeps old task exports including images and thumbnails when new options are omitted', async () => {
+    const task: TaskRecord = {
+      id: 'task-1',
+      prompt: '提示词',
+      params: {} as TaskParams,
+      inputImageIds: [],
+      outputImages: ['img-1'],
+      status: 'done',
+      error: null,
+      createdAt: 1700000000000,
+      finishedAt: 1700000000001,
+      elapsed: 1,
+    }
+    const image: StoredImage = { id: 'img-1', dataUrl: 'data:image/png;base64,AAECAw==' }
+    const thumbnail: StoredImageThumbnail = { id: 'img-1', thumbnailDataUrl: 'data:image/jpeg;base64,BAUG', thumbnailVersion: 2 }
+    const parsed = await readExportZip((await buildExportZip({
+      options: { exportTasks: true },
+      exportedAt: 1700000001000,
+      settings: {} as AppSettings,
+      tasks: [task],
+      images: [image],
+      thumbnailsByImageId: new Map([[thumbnail.id, thumbnail]]),
+      favoriteCollections: [],
+      defaultFavoriteCollectionId: null,
+      agentConversations: [],
+    })).bytes)
+
+    expect(Object.keys(parsed.manifest.imageFiles ?? {})).toEqual(['img-1'])
+    expect(Object.keys(parsed.manifest.thumbnailFiles ?? {})).toEqual(['img-1'])
+  })
+
 })

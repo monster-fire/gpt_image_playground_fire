@@ -95,9 +95,12 @@ try {
   await waitFor(two, "!!document.querySelector('header')")
   await evaluate(one, `(async () => {
     const { useStore } = await import('/src/store.ts')
+    const { saveNasSettings, waitForNasConfig } = await import('/src/lib/nasConfig.ts')
     const settings = useStore.getState().settings
-    useStore.getState().setSettings({ profiles: settings.profiles.map((p, i) => i ? p : { ...p, apiKey: 'browser-supplier-key', name: 'NAS saved profile' }) })
-    await (await import('/src/lib/nasConfig.ts')).waitForNasConfig()
+    const nextSettings = { profiles: settings.profiles.map((p, i) => i ? p : { ...p, apiKey: 'browser-supplier-key', name: 'NAS saved profile' }) }
+    useStore.getState().setSettings(nextSettings)
+    await saveNasSettings(useStore.getState().settings)
+    await waitForNasConfig()
     useStore.getState().setPrompt('kept local draft')
   })()`)
   const saved = JSON.parse(await readFile(join(directory, 'config.json'), 'utf8'))

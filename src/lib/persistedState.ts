@@ -18,6 +18,8 @@ export interface PersistedAppState {
   dismissedCodexCliPrompts: string[]
   appMode: AppMode
   galleryInputDraft: AgentInputDraft | null
+  galleryPromptPresetId?: string | null
+  galleryFinalPromptEdit?: { text: string; source: string } | null
   agentConversations?: AgentConversation[]
   activeAgentConversationId: string | null
   agentInputDrafts: Record<string, AgentInputDraft>
@@ -108,6 +110,8 @@ export function createPersistedState(state: PersistedStateSource, includeLegacyA
       : {}),
     dismissedCodexCliPrompts: state.dismissedCodexCliPrompts,
     appMode: state.appMode,
+    galleryPromptPresetId: settings.persistInputOnRestart ? state.galleryPromptPresetId ?? null : null,
+    galleryFinalPromptEdit: settings.persistInputOnRestart ? state.galleryFinalPromptEdit ?? null : null,
     galleryInputDraft: settings.persistInputOnRestart && galleryInputDraft
       ? { ...galleryInputDraft, inputImages: galleryInputDraft.inputImages.map((img) => ({ id: img.id, dataUrl: '' })) }
       : null,
@@ -208,6 +212,10 @@ export function normalizePersistedState(
       params: normalizeParams(persistedState.params, fallback.params),
       dismissedCodexCliPrompts: normalizeStringArray(persistedState.dismissedCodexCliPrompts, fallback.dismissedCodexCliPrompts),
       appMode,
+      galleryPromptPresetId: settings.persistInputOnRestart && typeof persistedState.galleryPromptPresetId === 'string' ? persistedState.galleryPromptPresetId : null,
+      galleryFinalPromptEdit: settings.persistInputOnRestart && isRecord(persistedState.galleryFinalPromptEdit) && typeof persistedState.galleryFinalPromptEdit.text === 'string' && typeof persistedState.galleryFinalPromptEdit.source === 'string'
+        ? { text: persistedState.galleryFinalPromptEdit.text, source: persistedState.galleryFinalPromptEdit.source }
+        : null,
       galleryInputDraft: galleryInputDraft && !isEmptyAgentInputDraft(galleryInputDraft) ? galleryInputDraft : null,
       agentConversations,
       activeAgentConversationId,

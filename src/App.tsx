@@ -27,7 +27,7 @@ import NasAuthGate from './components/NasAuthGate'
 let defaultConfigImportStarted = false
 
 export default function App() {
-  return isNasAuthEnabled() ? <NasAuthGate><Workspace /></NasAuthGate> : <Workspace />
+  return <NasAuthGate><Workspace /></NasAuthGate>
 }
 
 function Workspace() {

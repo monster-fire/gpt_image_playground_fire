@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { initStore, stopAllActiveRequests, useStore } from '../store'
-import { checkNasSession, expireNasSession, hasNasSession, nasFetch, type NasSession } from '../lib/nasAuth'
-import { captureLegacySettings, clearLegacyNasSettings, clearNasConfig, getLegacyNasSettings, loadNasSettings, localOnlySettings, nasSettingsSnapshot, saveNasSettings } from '../lib/nasConfig'
+import { checkNasSession, expireNasSession, nasFetch, type NasSession } from '../lib/nasAuth'
+import { captureLegacySettings, clearLegacyNasSettings, clearNasConfig, getLegacyNasSettings, loadNasSettings, localOnlySettings } from '../lib/nasConfig'
+import { clearPromptPresets, loadPromptPresets, setupPromptPresetAutoSync } from '../lib/promptPresets'
 
 let initialized: Promise<void> | null = null
 
@@ -29,6 +30,7 @@ export default function NasAuthGate({ children }: { children: ReactNode }) {
       useStore.getState().setSettings(settings)
       initialized ??= initStore().catch((cause) => { initialized = null; throw cause })
       await initialized
+      await loadPromptPresets({ force: true }).catch(() => {})
       if (current !== attempt.current) return
       setSession(nextSession)
       setPassword('')
@@ -46,6 +48,7 @@ export default function NasAuthGate({ children }: { children: ReactNode }) {
       attempt.current++
       stopAllActiveRequests()
       clearNasConfig()
+      clearPromptPresets()
       useStore.setState((state) => ({ settings: localOnlySettings(state.settings), previousPresetConfig: null, lightboxImageId: null, showSettings: false }))
       clearLegacyNasSettings()
       setSession(null)
@@ -69,6 +72,7 @@ export default function NasAuthGate({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (phase !== 'ready' || !session) return
+    const stopPresetSync = setupPromptPresetAutoSync()
     const timer = window.setTimeout(expireNasSession, Math.max(0, session.expiresAt - Date.now()))
     const recheck = () => {
       if (document.visibilityState === 'hidden') return
@@ -76,15 +80,9 @@ export default function NasAuthGate({ children }: { children: ReactNode }) {
     }
     window.addEventListener('focus', recheck)
     document.addEventListener('visibilitychange', recheck)
-    const unsubscribe = useStore.subscribe((state, previous) => {
-      if (!hasNasSession()) return
-      if (state.settings === previous.settings) return
-      if (JSON.stringify(nasSettingsSnapshot(state.settings)) === JSON.stringify(nasSettingsSnapshot(previous.settings))) return
-      void saveNasSettings(state.settings).catch(() => useStore.getState().setShowSettings(true))
-    })
     return () => {
       clearTimeout(timer)
-      unsubscribe()
+      stopPresetSync()
       window.removeEventListener('focus', recheck)
       document.removeEventListener('visibilitychange', recheck)
     }

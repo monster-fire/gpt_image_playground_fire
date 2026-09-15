@@ -1,6 +1,8 @@
+import { useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useStore } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { CloseIcon } from './icons'
 
@@ -12,6 +14,7 @@ export default function SupportPromptModal() {
   const lightboxImageId = useStore((s) => s.lightboxImageId)
   const showSettings = useStore((s) => s.showSettings)
   const maskEditorImageId = useStore((s) => s.maskEditorImageId)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
   const blockedByHigherPriorityModal = Boolean(
     confirmDialog || detailTaskId || lightboxImageId || showSettings || maskEditorImageId,
@@ -19,6 +22,7 @@ export default function SupportPromptModal() {
   const visible = supportPromptOpen && !blockedByHigherPriorityModal
 
   useCloseOnEscape(visible, dismissSupportPrompt)
+  useDialogFocus(visible, dialogRef)
   usePreventBackgroundScroll(visible)
 
   if (!visible) return null
@@ -31,6 +35,12 @@ export default function SupportPromptModal() {
     >
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm animate-overlay-in" />
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="support-prompt-title"
+        aria-describedby="support-prompt-description"
+        tabIndex={-1}
         className="relative z-10 w-full max-w-sm rounded-[2rem] border border-white/50 bg-white/95 p-6 pb-7 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10 flex flex-col"
         onClick={(event) => event.stopPropagation()}
       >
@@ -38,6 +48,7 @@ export default function SupportPromptModal() {
           <button
             type="button"
             onClick={dismissSupportPrompt}
+            data-autofocus
             className="rounded-full p-2 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-white/[0.08] dark:hover:text-gray-200"
             aria-label="关闭"
           >
@@ -53,11 +64,11 @@ export default function SupportPromptModal() {
           </div>
         </div>
 
-        <h3 className="mb-3 text-center text-xl font-bold text-gray-800 dark:text-gray-100">
+        <h3 id="support-prompt-title" className="mb-3 text-center text-xl font-bold text-gray-800 dark:text-gray-100">
           感谢使用 🎉
         </h3>
 
-        <p className="mb-8 px-2 text-center text-[15px] leading-relaxed text-gray-500 dark:text-gray-400">
+        <p id="support-prompt-description" className="mb-8 px-2 text-center text-[15px] leading-relaxed text-gray-500 dark:text-gray-400">
           你已经成功生成了超过 <strong className="font-semibold text-gray-800 dark:text-gray-200">50</strong> 张图片！<br />
           如果这个工具对你有所帮助，<br />
           欢迎赞助作者，或反馈分享你的建议。

@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { createInputImageFromFile, deleteImageIfUnreferenced, useStore } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { useHintTooltip } from '../hooks/useHintTooltip'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
@@ -299,6 +300,7 @@ interface LightboxInnerProps {
 /** 内部组件：保证挂载时 DOM 已经存在，所有 ref / effect 都可靠 */
 function LightboxInner({ src, previewSrc, loadState, imageId, maskPreviewSrc, onClose, onRetry, onImageError, showNav, currentIndex, total, onPrev, onNext, showInputActions, editDisabled, onReplace, onEdit }: LightboxInnerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(true, containerRef)
   const openedAtRef = useRef(Date.now())
   const editHint = useHintTooltip({ enabled: () => editDisabled })
 
@@ -750,6 +752,10 @@ function LightboxInner({ src, previewSrc, loadState, imageId, maskPreviewSrc, on
     <div
       ref={containerRef}
       data-lightbox-root
+      role="dialog"
+      aria-modal="true"
+      aria-label="图片预览"
+      tabIndex={-1}
       className="fixed inset-0 z-[60] flex items-center justify-center select-none"
       style={{ cursor: isZoomed ? (isDragging ? 'grabbing' : 'grab') : 'pointer' }}
       onClick={onClick}

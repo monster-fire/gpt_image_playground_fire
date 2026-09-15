@@ -8,6 +8,7 @@ import { storeImage } from '../lib/db'
 import { ensureImageCached } from '../lib/imageCache'
 import { prepareMaskTargetDataUrl, replaceMaskTargetImage } from '../lib/maskPreprocess'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import {
   clampViewTransform,
@@ -107,6 +108,7 @@ export default function MaskEditorModal() {
   const maskCanvasRef = useRef<HTMLCanvasElement>(null)
   const cursorCanvasRef = useRef<HTMLCanvasElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
   const baseFrameRef = useRef<HTMLDivElement>(null)
   const brushSizeControlRef = useRef<HTMLDivElement>(null)
   const brushSizeButtonRef = useRef<HTMLButtonElement>(null)
@@ -146,6 +148,7 @@ export default function MaskEditorModal() {
     setMaskEditorImageId(null)
   }
   useCloseOnEscape(Boolean(imageId), close)
+  useDialogFocus(Boolean(imageId), dialogRef)
   usePreventBackgroundScroll(Boolean(imageId))
 
   useEffect(() => () => {
@@ -835,11 +838,19 @@ export default function MaskEditorModal() {
 
   return (
     <>
-      <div data-no-drag-select className="fixed inset-0 z-[80] flex flex-col bg-gray-50 dark:bg-gray-900 animate-modal-in">
+      <div
+        ref={dialogRef}
+        data-no-drag-select
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mask-editor-title"
+        tabIndex={-1}
+        className="fixed inset-0 z-[80] flex flex-col bg-gray-50 dark:bg-gray-900 animate-modal-in"
+      >
       {/* Header */}
       <div className="flex-none flex items-center justify-between px-4 py-3 sm:px-6 sm:py-3.5 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950 z-20">
         <div className="flex items-center gap-3">
-          <button onClick={close} disabled={isSaving} className="p-2 sm:p-2.5 -ml-2 text-gray-500 hover:bg-gray-100 rounded-lg sm:rounded-xl dark:text-gray-400 dark:hover:bg-gray-800 transition" title="取消">
+          <button onClick={close} disabled={isSaving} data-autofocus className="p-2 sm:p-2.5 -ml-2 text-gray-500 hover:bg-gray-100 rounded-lg sm:rounded-xl dark:text-gray-400 dark:hover:bg-gray-800 transition" title="取消">
             <svg className="w-5 h-5 sm:w-6 sm:h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
           <div className="relative flex items-center gap-1.5 sm:gap-2">

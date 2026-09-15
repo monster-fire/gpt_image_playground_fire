@@ -2,13 +2,18 @@ import { useMemo, useRef, useState, useEffect } from 'react'
 import { useStore, reuseConfig, editOutputs, removeTask, taskMatchesFilterStatus, taskMatchesSearchQuery } from '../store'
 import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds } from '../lib/favoriteState'
 import TaskCard from './TaskCard'
+import { taskDeletionMessage, taskDeletionSignature } from '../lib/taskDeletionPreview'
 
 export default function TaskGrid() {
   const tasks = useStore((s) => s.tasks)
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
+  const setSearchQuery = useStore((s) => s.setSearchQuery)
+  const setFilterStatus = useStore((s) => s.setFilterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
+  const setFilterFavorite = useStore((s) => s.setFilterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
+  const setActiveFavoriteCollectionId = useStore((s) => s.setActiveFavoriteCollectionId)
   const defaultFavoriteCollectionId = useStore((s) => s.defaultFavoriteCollectionId)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
@@ -45,11 +50,55 @@ export default function TaskGrid() {
     })
   }, [tasks, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId, defaultFavoriteCollectionId])
 
+  const scopedTasks = useMemo(() => tasks.filter((t) => {
+    if (!filterFavorite) return true
+    if (!t.isFavorite) return false
+    if (activeFavoriteCollectionId && activeFavoriteCollectionId !== ALL_FAVORITES_COLLECTION_ID && !getTaskFavoriteCollectionIds(t, defaultFavoriteCollectionId).includes(activeFavoriteCollectionId)) return false
+    return true
+  }), [tasks, filterFavorite, activeFavoriteCollectionId, defaultFavoriteCollectionId])
+
+  const clearFilters = () => {
+    setSearchQuery('')
+    setFilterStatus('all')
+    clearSelection()
+  }
+
+  const returnToAllImages = () => {
+    setSearchQuery('')
+    setFilterStatus('all')
+    setFilterFavorite(false)
+    setActiveFavoriteCollectionId(null)
+    clearSelection()
+  }
+
   const handleDelete = (task: typeof tasks[0]) => {
     setConfirmDialog({
       title: '删除任务',
-      message: '确定要删除这个任务吗？关联的图片资源也会被清理（如果没有其他任务引用）。',
-      action: () => removeTask(task),
+      message: taskDeletionMessage([task]),
+      awaitAction: true,
+      action: async () => {
+        const latest = useStore.getState().tasks.find((item) => item.id === task.id)
+        if (!latest) {
+          useStore.getState().showToast('任务已不存在', 'info')
+          return true
+        }
+        if (latest.status === 'running' || latest.falRecoverable || latest.customRecoverable) {
+          useStore.getState().showToast('任务仍在生成或恢复中，请先停止后再删除', 'info')
+          return true
+        }
+        if (taskDeletionSignature([latest]) !== taskDeletionSignature([task])) {
+          handleDelete(latest)
+          return false
+        }
+        try {
+          await removeTask(latest)
+          return true
+        } catch (err) {
+          console.error(err)
+          useStore.getState().showToast('删除任务失败', 'error')
+          return false
+        }
+      },
     })
   }
 
@@ -255,11 +304,24 @@ export default function TaskGrid() {
   }, [clearSelection, isMac])
 
   if (!filteredTasks.length) {
+    const hasAnyTasks = tasks.length > 0
+    const hasScopedTasks = scopedTasks.length > 0
+    const hasSearchOrStatusFilter = Boolean(searchQuery.trim()) || filterStatus !== 'all'
+    const inFavoriteScope = filterFavorite || Boolean(activeFavoriteCollectionId)
+    const title = !hasAnyTasks
+      ? '输入提示词开始生成图片'
+      : !hasScopedTasks && inFavoriteScope
+      ? activeFavoriteCollectionId ? '这个收藏夹还没有图片' : '还没有收藏图片'
+      : '没有找到匹配的任务'
+    const description = hasAnyTasks && hasScopedTasks && hasSearchOrStatusFilter
+      ? '当前搜索词或状态筛选下没有结果。'
+      : hasAnyTasks && !hasScopedTasks && inFavoriteScope
+      ? '返回全部图片可以查看画廊中的其他记录。'
+      : ''
+
     return (
       <div className="text-center py-20 text-gray-400 dark:text-gray-500">
-        {searchQuery || filterFavorite ? (
-          <p className="text-sm">没有找到匹配的任务</p>
-        ) : (
+        {!hasAnyTasks ? (
           <>
             <svg
               className="w-16 h-16 mx-auto mb-4 text-gray-200 dark:text-gray-700"
@@ -274,8 +336,33 @@ export default function TaskGrid() {
                 d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
               />
             </svg>
-            <p className="text-sm">输入提示词开始生成图片</p>
+            <p className="text-sm">{title}</p>
           </>
+        ) : (
+          <div className="mx-auto flex max-w-sm flex-col items-center gap-3">
+            <p className="text-sm">{title}</p>
+            {description && <p className="text-xs text-gray-400 dark:text-gray-500">{description}</p>}
+            <div className="flex flex-wrap justify-center gap-2">
+              {hasSearchOrStatusFilter && (
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-white/[0.06]"
+                >
+                  清除筛选
+                </button>
+              )}
+              {!hasScopedTasks && inFavoriteScope && (
+                <button
+                  type="button"
+                  onClick={returnToAllImages}
+                  className="rounded-lg bg-blue-500 px-3 py-2 text-sm text-white transition hover:bg-blue-600"
+                >
+                  返回全部图片
+                </button>
+              )}
+            </div>
+          </div>
         )}
       </div>
     )

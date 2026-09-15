@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AgentConversation, AgentMessage, AgentRound, TaskRecord } from '../types'
 import { DEFAULT_PARAMS } from '../types'
 import { getSelectedImageMentionLabel } from './promptImageMentions'
-import { buildAgentApiInput, buildAgentContinuationInput } from './agentInputBuilder'
+import { buildAgentApiInput, buildAgentContinuationInput, collectAgentInputImageIds } from './agentInputBuilder'
 
 function round(id: string, index: number, patch: Partial<AgentRound> = {}): AgentRound {
   return {
@@ -390,6 +390,90 @@ describe('agent input builder', () => {
         }],
       },
     ])
+  })
+
+  it('counts unique image ids on the active path for preparation progress', async () => {
+    const first = round('round-1', 1, {
+      inputImageIds: ['shared-input', 'first-input'],
+      outputTaskIds: ['base-task'],
+      assistantMessageId: 'assistant-1',
+    })
+    const sibling = round('round-2-a', 2, {
+      parentRoundId: first.id,
+      inputImageIds: ['sibling-input'],
+      outputTaskIds: ['sibling-task'],
+    })
+    const currentRound = round('round-2-b', 2, {
+      parentRoundId: first.id,
+      inputImageIds: ['shared-input', 'current-input'],
+      status: 'running',
+      finishedAt: null,
+    })
+    const tasks = [
+      task('base-task', { outputImages: ['base-image', 'shared-input'] }),
+      task('sibling-task', { outputImages: ['sibling-output'] }),
+    ]
+    const onPrepareImages = vi.fn()
+
+    const ids = collectAgentInputImageIds({
+      conversation: conversation([first, sibling, currentRound], [
+        message(first, 'first'),
+        message(sibling, 'sibling'),
+        message(currentRound, 'current'),
+      ]),
+      currentRound,
+      tasks,
+      onPrepareImages,
+    })
+
+    expect(ids).toEqual(['shared-input', 'first-input', 'base-image', 'current-input'])
+    expect(onPrepareImages).toHaveBeenCalledWith(4)
+  })
+
+  it('counts continuation batch images without repeating current-path images', async () => {
+    const first = round('round-1', 1, {
+      outputTaskIds: ['base-task'],
+      assistantMessageId: 'assistant-1',
+    })
+    const currentRound = round('round-2', 2, {
+      parentRoundId: first.id,
+      outputTaskIds: ['existing-task', 'batch-done', 'batch-running'],
+      status: 'running',
+      finishedAt: null,
+    })
+    const tasks = [
+      task('base-task', { outputImages: ['base-image'] }),
+      task('existing-task', { outputImages: ['existing-image'] }),
+      task('batch-done', { outputImages: ['base-image', 'batch-image'], status: 'done' }),
+      task('batch-running', { outputImages: ['running-image'], status: 'running' }),
+    ]
+    const conv = conversation([first, currentRound], [message(first, 'first'), message(currentRound, 'current')])
+    const onPrepareImages = vi.fn()
+
+    const ids = collectAgentInputImageIds({
+      conversation: conv,
+      currentRound,
+      tasks,
+      batchTaskIds: ['batch-done', 'batch-running'],
+      onPrepareImages,
+    })
+
+    expect(ids).toEqual(['base-image', 'batch-image'])
+    expect(onPrepareImages).toHaveBeenCalledWith(2)
+
+    await buildAgentContinuationInput({
+      baseInput: [],
+      conversation: conv,
+      currentRound,
+      tasks,
+      currentRoundOutput: [],
+      batchTaskIds: ['batch-done', 'batch-running'],
+      toolCallsUsed: 1,
+      maxToolCalls: 3,
+      loadImage: noImage,
+      onPrepareImages,
+    })
+    expect(onPrepareImages).toHaveBeenLastCalledWith(2)
   })
 
   it('builds continuation with sanitized output and function results before the system message', async () => {

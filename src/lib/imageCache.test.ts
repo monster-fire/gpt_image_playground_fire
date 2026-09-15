@@ -13,6 +13,7 @@ import {
   cacheImage,
   cacheThumbnail,
   clearImageCaches,
+  clearRebuildableImageCaches,
   deleteImageCacheEntry,
   ensureImageThumbnailCached,
   getCachedImage,
@@ -167,5 +168,30 @@ describe('imageCache', () => {
     scheduleThumbnailBackfill(['image'])
     await vi.advanceTimersByTimeAsync(250)
     await vi.waitFor(() => expect(db.getImageThumbnail).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not publish stale thumbnail backfills after rebuildable cache cleanup', async () => {
+    vi.useFakeTimers()
+    db.getImage.mockResolvedValue({ width: 1000, height: 1000 })
+    let resolveThumbnail: ((value: unknown) => void) | undefined
+    db.getImageThumbnail.mockImplementation(() => new Promise((resolve) => {
+      resolveThumbnail = resolve
+    }))
+    const onThumbnail = vi.fn()
+    subscribeImageThumbnail('slow', onThumbnail)
+
+    scheduleThumbnailBackfill(['slow'], 'visible')
+    await vi.advanceTimersByTimeAsync(250)
+    await vi.waitFor(() => expect(db.getImageThumbnail).toHaveBeenCalledOnce())
+
+    clearRebuildableImageCaches()
+    resolveThumbnail?.({
+      thumbnailDataUrl: 'late-thumbnail',
+      thumbnailVersion: db.CURRENT_THUMBNAIL_VERSION,
+    })
+    await vi.waitFor(() => expect(db.getImageThumbnail).toHaveBeenCalledOnce())
+
+    expect(onThumbnail).not.toHaveBeenCalled()
+    await expect(ensureImageThumbnailCached('slow')).resolves.toBeUndefined()
   })
 })

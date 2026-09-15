@@ -6,6 +6,8 @@ import { once } from 'node:events'
 import { createServer } from 'vite'
 
 const server = await createServer({
+  appType: 'custom',
+  optimizeDeps: { noDiscovery: true, entries: [] },
   server: { host: '127.0.0.1', port: 0 }, logLevel: 'error',
   plugins: [{ name: 'cache-test', configureServer(server) {
     server.middlewares.use('/cache-test', (_req, res) => { res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><title>Cache test</title>') })
@@ -14,7 +16,7 @@ const server = await createServer({
 await server.listen()
 const directory = await mkdtemp(join(tmpdir(), 'agent-cache-test-'))
 const browser = spawn(process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', [
-  '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+  '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox', '--no-first-run', '--no-default-browser-check',
   '--remote-debugging-port=0', `--user-data-dir=${directory}`, 'about:blank',
 ], { windowsHide: true, stdio: 'ignore' })
 let socket
@@ -46,7 +48,7 @@ try {
   const { targetId } = await send('Target.createTarget', { url })
   const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true })
   await new Promise((resolve) => setTimeout(resolve, 1000))
-  for (const phase of ['seedLegacyDatabase', 'firstSend', 'afterReload']) {
+  for (const phase of ['seedLegacyDatabase', 'firstSend', 'afterReload', 'measureIncrementalPreparation']) {
     if (phase === 'afterReload') {
       await send('Page.reload', {}, sessionId)
       await new Promise((resolve) => setTimeout(resolve, 1000))

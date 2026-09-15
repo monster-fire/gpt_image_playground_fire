@@ -1,70 +1,58 @@
 import { useEffect, useMemo, useState, useRef, useCallback, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import type { AgentMessage, AgentRound, TaskRecord } from '../types'
-import { editOutputs, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, reuseConfig, useStore } from '../store'
+import { editOutputs, regenerateAgentAssistantMessage, removeTask, reuseConfig, useStore } from '../store'
 import { getActiveAgentRounds, getAgentBranchLeafId, getConversationSearchText, getAgentRoundTaskIds, getAgentSiblingRounds } from '../lib/agentConversationState'
-import { ensureImageCached, getCachedImage } from '../lib/imageCache'
+import { ensureImageCached } from '../lib/imageCache'
 import { getPromptMentionParts } from '../lib/promptImageMentions'
 import { copyTextToClipboard, getClipboardFailureMessage } from '../lib/clipboard'
 import type { AgentWebSearchStatus } from '../lib/agentWebSearch'
 import { getAgentAssistantBlocks, getAgentAssistantCopyContent, getRoundTaskSlots } from '../lib/agentAssistantBlocks'
-import { createMaskPreviewDataUrl } from '../lib/canvasImage'
+import { taskDeletionMessage, taskDeletionSignature } from '../lib/taskDeletionPreview'
 import { downloadImageEntriesAsZip, downloadImageIds, getImageZipEntries } from '../lib/downloadImages'
 import TaskCard from './TaskCard'
 import MarkdownRenderer from './MarkdownRenderer'
+import AgentChatImageThumb from './AgentChatImageThumb'
+import AgentProgressLabel from './AgentProgressLabel'
 import { TooltipButton as AgentActionButton } from './TooltipButton'
 import { TrashIcon, DownloadIcon, EditIcon, ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, SidebarLeftIcon, FavoriteIcon, CloseIcon, CopyIcon, RefreshIcon, ArrowDownIcon } from './icons'
 
-function ChatImageThumb({ imageId, imageIndex, maskImageId }: { imageId: string; imageIndex: number; maskImageId?: string | null }) {
-  const [src, setSrc] = useState<string>(() => getCachedImage(imageId) || '')
-  const setLightboxImageId = useStore((s) => s.setLightboxImageId)
+const AGENT_BOTTOM_FOLLOW_THRESHOLD = 100
 
-  useEffect(() => {
-    let cancelled = false
-
-    if (maskImageId) {
-      Promise.all([ensureImageCached(imageId), ensureImageCached(maskImageId)])
-        .then(async ([baseUrl, maskUrl]) => {
-          if (!baseUrl || !maskUrl) return baseUrl || ''
-          return createMaskPreviewDataUrl(baseUrl, maskUrl)
-        })
-        .then((url) => {
-          if (!cancelled && url) setSrc(url)
-        })
-        .catch(() => {
-          if (!cancelled) setSrc(getCachedImage(imageId) || '')
-        })
-      return () => { cancelled = true }
-    }
-
-    const cached = getCachedImage(imageId)
-    if (cached) {
-      setSrc(cached)
-      return () => { cancelled = true }
-    }
-    ensureImageCached(imageId).then((url) => {
-      if (!cancelled && url) setSrc(url)
-    })
-    return () => { cancelled = true }
-  }, [imageId, maskImageId])
-
-  return (
-    <div 
-      className={`relative h-16 w-16 shrink-0 overflow-hidden rounded-lg shadow-sm cursor-pointer transition-opacity hover:opacity-90 ${
-        maskImageId ? 'border-2 border-blue-500' : 'border border-gray-200 dark:border-white/[0.08]'
-      }`}
-      onClick={() => setLightboxImageId(imageId, [imageId])}
-    >
-      {src ? <img src={src} className="h-full w-full object-cover" alt="" /> : <div className="h-full w-full bg-gray-100 dark:bg-white/[0.04]" />}
-      {maskImageId && (
-        <span className="absolute left-1 top-1 z-10 rounded bg-blue-500/90 px-1.5 py-0.5 text-[8px] font-bold leading-none tracking-wider text-white backdrop-blur-sm pointer-events-none">
-          MASK
-        </span>
-      )}
-      <span className="absolute bottom-1 left-1 z-10 flex h-4 w-4 items-center justify-center rounded-full bg-black/55 text-[9px] font-semibold text-white backdrop-blur-sm pointer-events-none">
-        {imageIndex + 1}
-      </span>
-    </div>
+function getConversationDeletionTasks(conversationId: string, conversations: AgentRoundOwner[], tasks: TaskRecord[]) {
+  const targetConversation = conversations.find((item) => item.id === conversationId) ?? null
+  const roundIds = new Set(targetConversation?.rounds.map((round) => round.id) ?? [])
+  const roundTaskIds = targetConversation?.rounds.flatMap((round) => round.outputTaskIds) ?? []
+  const relatedTasks = tasks.filter((task) =>
+    task.agentConversationId === conversationId || Boolean(task.agentRoundId && roundIds.has(task.agentRoundId)),
   )
+  const byId = new Map(tasks.map((task) => [task.id, task]))
+  return Array.from(new Set([...roundTaskIds, ...relatedTasks.map((task) => task.id)]))
+    .map((taskId) => byId.get(taskId))
+    .filter((task): task is TaskRecord => Boolean(task))
+}
+
+type AgentRoundOwner = { id: string; rounds: AgentRound[]; messages: AgentMessage[] }
+
+function getMessageDeletionTasks(conversation: AgentRoundOwner | null | undefined, message: AgentMessage, round: AgentRound, tasks: TaskRecord[]) {
+  if (!conversation) return []
+  const messageIds = new Set(conversation.messages.filter((item) => item.roundId === round.id).map((item) => item.id))
+  messageIds.add(round.userMessageId)
+  if (round.assistantMessageId) messageIds.add(round.assistantMessageId)
+  const taskIds = message.role === 'user'
+    ? [
+        ...round.outputTaskIds,
+        ...conversation.messages.filter((item) => messageIds.has(item.id)).flatMap((item) => item.outputTaskIds ?? []),
+        ...tasks
+          .filter((task) => task.agentRoundId === round.id || Boolean(task.agentMessageId && messageIds.has(task.agentMessageId)))
+          .map((task) => task.id),
+      ]
+    : [
+        ...(message.outputTaskIds ?? []),
+        ...round.outputTaskIds,
+        ...tasks.filter((task) => task.agentMessageId === message.id).map((task) => task.id),
+      ]
+  const byId = new Map(tasks.map((task) => [task.id, task]))
+  return Array.from(new Set(taskIds)).map((taskId) => byId.get(taskId)).filter((task): task is TaskRecord => Boolean(task))
 }
 
 function AgentStreamingCursor() {
@@ -166,7 +154,7 @@ export default function AgentWorkspace() {
     }
 
     const viewportHeight = window.visualViewport?.height ?? window.innerHeight
-    setIsScrolledToBottom(sentinel.getBoundingClientRect().top <= viewportHeight + 24)
+    setIsScrolledToBottom(sentinel.getBoundingClientRect().top <= viewportHeight + AGENT_BOTTOM_FOLLOW_THRESHOLD)
   }, [appMode])
 
   const scrollToAgentBottom = useCallback(() => {
@@ -371,6 +359,18 @@ export default function AgentWorkspace() {
   }, [activeMessages, activeRounds, updateIsScrolledToBottom])
 
   useEffect(() => {
+    if (appMode !== 'agent' || !isScrolledToBottom) return
+    const lastMessage = activeMessages[activeMessages.length - 1] ?? null
+    const hasRunningRound = activeRounds.some((round) => round.status === 'running')
+    if (lastMessage?.role !== 'assistant' && !hasRunningRound) return
+
+    const frame = window.requestAnimationFrame(() => {
+      scrollToAgentBottom()
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeMessages, activeRounds, appMode, isScrolledToBottom, scrollToAgentBottom])
+
+  useEffect(() => {
     if (!scrollTargetRoundId) return
     const id = window.requestAnimationFrame(() => {
       messageRefs.current.get(scrollTargetRoundId)?.scrollIntoView({ block: 'center' })
@@ -392,34 +392,51 @@ export default function AgentWorkspace() {
   }
 
   const handleDeleteConversation = (id: string) => {
-    const targetConversation = conversations.find((item) => item.id === id) ?? null
-    const roundIds = new Set(targetConversation?.rounds.map((round) => round.id) ?? [])
-    const roundTaskIds = targetConversation?.rounds.flatMap((round) => round.outputTaskIds) ?? []
-    const relatedTasks = tasks.filter((task) =>
-      task.agentConversationId === id || Boolean(task.agentRoundId && roundIds.has(task.agentRoundId)),
-    )
-    const existingTaskIds = new Set(tasks.map((task) => task.id))
-    const relatedTaskIds = Array.from(new Set([...roundTaskIds, ...relatedTasks.map((task) => task.id)]))
-      .filter((taskId) => existingTaskIds.has(taskId))
-    const relatedTaskIdSet = new Set(relatedTaskIds)
-    const generatedImageCount = new Set(
-      tasks
-        .filter((task) => relatedTaskIdSet.has(task.id))
-        .flatMap((task) => task.outputImages || []),
-    ).size
+    const relatedTasks = getConversationDeletionTasks(id, conversations, tasks)
+    const signature = taskDeletionSignature(relatedTasks)
+    const generatedImageCount = new Set(relatedTasks.flatMap((task) => task.outputImages || [])).size
 
     setConfirmDialog({
       title: '删除对话',
-      message: '确定要删除这个 Agent 对话吗？',
+      message: generatedImageCount > 0
+        ? `确定要删除这个 Agent 对话吗？\n\n默认只删除本地对话，保留画廊任务。勾选后${taskDeletionMessage(relatedTasks)}`
+        : '确定要删除这个 Agent 对话吗？默认只删除本地对话，保留画廊任务。',
+      awaitAction: true,
       checkbox: generatedImageCount > 0
         ? {
-            label: `同时删除对话中生成的图片（${generatedImageCount} 张）`,
+            label: `同时删除关联任务（${relatedTasks.length} 个）和输出图片（${generatedImageCount} 张）`,
             tone: 'danger',
           }
         : undefined,
       action: async (deleteGeneratedImages = false) => {
-        deleteConversation(id)
-        if (deleteGeneratedImages && relatedTaskIds.length > 0) await removeMultipleTasks(relatedTaskIds)
+        const latest = useStore.getState()
+        const latestTasks = getConversationDeletionTasks(id, latest.agentConversations, latest.tasks)
+        if (taskDeletionSignature(latestTasks) !== signature) {
+          showToast('删除范围已变化，请重新确认', 'info')
+          handleDeleteConversation(id)
+          return false
+        }
+        try {
+          const result = await deleteConversation(id, { deleteRelatedTasks: deleteGeneratedImages })
+          if (result === 'running') {
+            showToast('该对话仍有内容正在生成，请先停止后再删除', 'info')
+            return true
+          }
+          if (result === 'not-found') {
+            showToast('该对话已不存在', 'info')
+            return true
+          }
+          if (result === 'deleted-with-warning') {
+            showToast('已删除对话，但关联图片清理未完成', 'error')
+            return true
+          }
+          showToast(deleteGeneratedImages ? '已删除对话及关联任务' : '已删除对话', 'success')
+          return true
+        } catch (err) {
+          console.error(err)
+          showToast('删除对话失败', 'error')
+          return false
+        }
       },
     })
   }
@@ -497,14 +514,29 @@ export default function AgentWorkspace() {
   const handleDeleteMessage = (message: AgentMessage, round: AgentRound) => {
     const isUserMessage = message.role === 'user'
     const conversationId = conversation?.id
+    const relatedTasks = getMessageDeletionTasks(conversation, message, round, tasks)
+    const signature = taskDeletionSignature(relatedTasks)
     setConfirmDialog({
       title: isUserMessage ? '删除轮次' : '删除消息',
       message: isUserMessage
-        ? '确定要删除这轮任务吗？这会删除这条消息和它的输出，后续消息会被保留。'
-        : '确定要删除这条消息吗？这会同时删除这条回复生成的图片。',
+        ? `确定要删除这轮任务吗？这会删除这条消息和它的输出，后续消息会被保留。\n\n${taskDeletionMessage(relatedTasks)}`
+        : `确定要删除这条消息吗？这会同时删除这条回复生成的图片。\n\n${taskDeletionMessage(relatedTasks)}`,
       awaitAction: true,
       action: async () => {
         if (!conversationId) return true
+        const latest = useStore.getState()
+        const latestConversation = latest.agentConversations.find((item) => item.id === conversationId)
+        const latestRound = latestConversation?.rounds.find((item) => item.id === round.id)
+        const latestMessage = latestConversation?.messages.find((item) => item.id === message.id)
+        if (!latestRound || !latestMessage) {
+          showToast(isUserMessage ? '该轮次已不存在' : '该消息已不存在', 'info')
+          return true
+        }
+        if (taskDeletionSignature(getMessageDeletionTasks(latestConversation, latestMessage, latestRound, latest.tasks)) !== signature) {
+          showToast('删除范围已变化，请重新确认', 'info')
+          handleDeleteMessage(latestMessage, latestRound)
+          return false
+        }
         try {
           const result = isUserMessage
             ? await deleteAgentRound(conversationId, round.id)
@@ -807,10 +839,11 @@ export default function AgentWorkspace() {
                     {message.role === 'user' && round && round.inputImageIds.length > 0 && (
                       <div className="flex gap-2 mb-3 overflow-x-auto pb-1" onClick={e => e.stopPropagation()}>
                           {round.inputImageIds.map((imgId, imageIndex) => (
-                            <ChatImageThumb
+                            <AgentChatImageThumb
                               key={imgId}
                               imageId={imgId}
                               imageIndex={imageIndex}
+                              imageIds={round.inputImageIds}
                               maskImageId={imgId === (round.maskTargetImageId ?? round.inputImageIds[0]) ? round.maskImageId : null}
                             />
                           ))}
@@ -877,7 +910,30 @@ export default function AgentWorkspace() {
                                     onClick={() => setDetailTaskId(block.task.id)}
                                     onReuse={() => handleReuse(block.task)}
                                     onEditOutputs={() => editOutputs(block.task)}
-                                    onDelete={() => setConfirmDialog({ title: '删除任务', message: '确定要删除这个任务吗？', action: () => removeTask(block.task) })}
+                                    onDelete={() => setConfirmDialog({
+                                      title: '删除任务',
+                                      message: '确定要删除这个任务吗？关联的图片资源也会被清理（如果没有其他任务引用）。',
+                                      awaitAction: true,
+                                      action: async () => {
+                                        const latest = useStore.getState().tasks.find((item) => item.id === block.task.id)
+                                        if (!latest) {
+                                          showToast('任务已不存在', 'info')
+                                          return true
+                                        }
+                                        if (latest.status === 'running' || latest.falRecoverable || latest.customRecoverable) {
+                                          showToast('任务仍在生成或恢复中，请先停止后再删除', 'info')
+                                          return true
+                                        }
+                                        try {
+                                          await removeTask(latest)
+                                          return true
+                                        } catch (err) {
+                                          console.error(err)
+                                          showToast('删除任务失败', 'error')
+                                          return false
+                                        }
+                                      },
+                                    })}
                                   />
                                 </div>
                               )
@@ -1020,7 +1076,7 @@ export default function AgentWorkspace() {
                         </div>
                         <div className="flex items-center gap-3 text-sm text-gray-500 dark:text-gray-400">
                           <span className="inline-flex items-center gap-1.5">
-                            <span>正在生成回复</span>
+                            <AgentProgressLabel conversationId={conversation.id} />
                             <span className="flex gap-1">
                               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
                               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current [animation-delay:150ms]" />

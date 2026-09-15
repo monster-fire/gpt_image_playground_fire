@@ -311,6 +311,118 @@ test('api config supports missing file defaults, If-Match, CSRF, and atomic JSON
   }
 })
 
+test('prompt presets initialize once, require auth and CSRF, support empty lists and persist across restart', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'gip-auth-'))
+  const promptPresetsPath = join(dataDir, 'data', 'prompt-presets.json')
+  try {
+    const app = await createApp({ password: 'secret', dataDir, promptPresetsPath, cookieSecure: false })
+    const server = await listen(app.handler)
+
+    let res = await fetch(`${server.url}/api/prompt-presets`)
+    assert.equal(res.status, 401)
+
+    const auth = await login(server.url)
+    res = await fetch(`${server.url}/api/prompt-presets`, { headers: { Cookie: auth.cookie } })
+    let body = await res.json()
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('cache-control'), 'no-store')
+    assert.equal(body.presets.length, 1)
+    assert.equal(body.presets[0].name, '女性写真 · 丰腴曲线')
+    assert.ok(body.presets[0].content.includes('年轻成年东方女性'))
+    const revision = body.revision
+
+    res = await fetch(`${server.url}/api/prompt-presets`, {
+      method: 'PUT',
+      headers: {
+        Cookie: auth.cookie,
+        'Content-Type': 'application/json',
+        'If-Match': revision,
+        Origin: server.url,
+      },
+      body: JSON.stringify({ presets: [] }),
+    })
+    assert.equal(res.status, 403)
+
+    res = await fetch(`${server.url}/api/prompt-presets`, {
+      method: 'PUT',
+      headers: {
+        Cookie: auth.cookie,
+        'Content-Type': 'application/json',
+        'x-csrf-token': auth.csrfToken,
+        'If-Match': revision,
+        Origin: server.url,
+      },
+      body: JSON.stringify({ presets: [] }),
+    })
+    body = await res.json()
+    assert.equal(res.status, 200)
+    assert.deepEqual(body.presets, [])
+    assert.notEqual(body.revision, revision)
+
+    await server.close()
+
+    const app2 = await createApp({ password: 'secret', dataDir, promptPresetsPath, cookieSecure: false })
+    const server2 = await listen(app2.handler)
+    const auth2 = await login(server2.url)
+    res = await fetch(`${server2.url}/api/prompt-presets`, { headers: { Cookie: auth2.cookie } })
+    body = await res.json()
+    assert.equal(res.status, 200)
+    assert.deepEqual(body.presets, [])
+    await server2.close()
+  } finally {
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
+test('prompt presets reject stale revisions and invalid shapes while preserving current library', async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'gip-auth-'))
+  const promptPresetsPath = join(dataDir, 'prompt-presets.json')
+  try {
+    const app = await createApp({ password: 'secret', dataDir, promptPresetsPath, cookieSecure: false })
+    const server = await listen(app.handler)
+    const auth = await login(server.url)
+    const initial = await (await fetch(`${server.url}/api/prompt-presets`, { headers: { Cookie: auth.cookie } })).json()
+
+    const headers = {
+      Cookie: auth.cookie,
+      'Content-Type': 'application/json',
+      'x-csrf-token': auth.csrfToken,
+      'If-Match': initial.revision,
+      Origin: server.url,
+    }
+    let res = await fetch(`${server.url}/api/prompt-presets`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ presets: [{ id: 'portrait', name: '写真', content: '自然光人像' }] }),
+    })
+    let body = await res.json()
+    assert.equal(res.status, 200)
+    assert.equal(body.presets[0].id, 'portrait')
+    assert.equal(typeof body.presets[0].revision, 'string')
+    assert.ok(body.presets[0].createdAt > 0)
+
+    res = await fetch(`${server.url}/api/prompt-presets`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ presets: [] }),
+    })
+    assert.equal(res.status, 409)
+
+    res = await fetch(`${server.url}/api/prompt-presets`, {
+      method: 'PUT',
+      headers: { ...headers, 'If-Match': body.revision },
+      body: JSON.stringify({ presets: [{ id: 'bad', name: '', content: 'x' }] }),
+    })
+    assert.equal(res.status, 422)
+
+    const current = await (await fetch(`${server.url}/api/prompt-presets`, { headers: { Cookie: auth.cookie } })).json()
+    assert.deepEqual(current.presets.map((preset) => preset.id), ['portrait'])
+    await server.close()
+  } finally {
+    await rm(dataDir, { recursive: true, force: true })
+  }
+})
+
 test('origin check preserves forwarded host port and supports explicit HTTPS app origin', async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'gip-auth-'))
   try {

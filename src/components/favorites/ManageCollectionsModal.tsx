@@ -8,7 +8,9 @@ import {
   useStore,
 } from '../../store'
 import { getTaskFavoriteCollectionIds } from '../../lib/favoriteState'
+import { taskDeletionMessage, taskDeletionSignature } from '../../lib/taskDeletionPreview'
 import { useCloseOnEscape } from '../../hooks/useCloseOnEscape'
+import { useDialogFocus } from '../../hooks/useDialogFocus'
 import { usePreventBackgroundScroll } from '../../hooks/usePreventBackgroundScroll'
 import { TooltipButton as FavoriteActionButton } from '../TooltipButton'
 import { CloseIcon, DragHandleIcon, EditIcon, FavoriteIcon, TrashIcon } from '../icons'
@@ -46,6 +48,7 @@ export function ManageCollectionsModal() {
   const selectableCollections = collections
 
   useCloseOnEscape(open, closeManage)
+  useDialogFocus(open, modalRef)
   usePreventBackgroundScroll(open, modalRef)
 
   useEffect(() => {
@@ -259,18 +262,36 @@ export function ManageCollectionsModal() {
     e.stopPropagation()
     if (collections.length <= 1) return
     const collectionTasks = tasks.filter(t => getTaskFavoriteCollectionIds(t, defaultFavoriteCollectionId).includes(collection.id))
+    const signature = taskDeletionSignature(collectionTasks)
     const imageCount = new Set(collectionTasks.flatMap((task) => task.outputImages || [])).size
     setConfirmDialog({
       title: '删除收藏夹',
-      message: `确定要删除收藏夹「${collection.name}」吗？`,
+      message: imageCount > 0
+        ? `确定要删除收藏夹「${collection.name}」吗？\n\n默认只删除本地收藏夹归属。勾选后${taskDeletionMessage(collectionTasks)}`
+        : `确定要删除收藏夹「${collection.name}」吗？默认只删除本地收藏夹归属。`,
       checkbox: imageCount > 0
         ? {
             label: `同时删除收藏夹中的图片（${imageCount} 张）`,
             tone: 'danger',
           }
         : undefined,
-      action: (deleteImages = false) => {
-        void deleteFavoriteCollection(collection.id, deleteImages)
+      awaitAction: true,
+      action: async (deleteImages = false) => {
+        const latest = useStore.getState()
+        const latestTasks = latest.tasks.filter(t => getTaskFavoriteCollectionIds(t, latest.defaultFavoriteCollectionId).includes(collection.id))
+        if (taskDeletionSignature(latestTasks) !== signature) {
+          latest.showToast('删除范围已变化，请重新确认', 'info')
+          handleDelete(e, collection)
+          return false
+        }
+        try {
+          await deleteFavoriteCollection(collection.id, deleteImages)
+          return true
+        } catch (err) {
+          console.error(err)
+          useStore.getState().showToast('删除收藏夹失败', 'error')
+          return false
+        }
       },
     })
   }
@@ -297,12 +318,12 @@ export function ManageCollectionsModal() {
   return createPortal(
     <div data-no-drag-select className="fixed inset-0 z-[105] flex items-center justify-center p-4 sm:p-0" onClick={closeManage}>
       <div className="absolute inset-0 bg-black/40 backdrop-blur-sm animate-overlay-in" />
-      <div ref={modalRef} className="relative z-10 flex max-h-[85vh] w-full max-w-[400px] flex-col overflow-hidden rounded-3xl bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] ring-1 ring-black/5 dark:ring-white/10 animate-modal-in" onClick={(e) => e.stopPropagation()}>
+      <div ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="manage-collections-title" tabIndex={-1} className="relative z-10 flex max-h-[85vh] w-full max-w-[400px] flex-col overflow-hidden rounded-3xl bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] ring-1 ring-black/5 dark:ring-white/10 animate-modal-in" onClick={(e) => e.stopPropagation()}>
         <div className="px-6 pt-6 pb-4 shrink-0 relative border-b border-gray-100 dark:border-[#333]">
           <FavoriteActionButton tooltip="关闭" onClick={closeManage} wrapperClassName="absolute right-5 top-5 inline-flex" className="shrink-0 rounded-full p-1.5 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200">
             <CloseIcon className="h-5 w-5" />
           </FavoriteActionButton>
-          <h2 className="mb-2 pr-8 flex items-center gap-2.5 text-lg font-semibold text-gray-800 dark:text-gray-100 leading-snug">
+          <h2 id="manage-collections-title" className="mb-2 pr-8 flex items-center gap-2.5 text-lg font-semibold text-gray-800 dark:text-gray-100 leading-snug">
             管理收藏夹
           </h2>
           <p className="text-[13px] text-gray-500 dark:text-gray-400 leading-relaxed">
@@ -398,6 +419,7 @@ export function ManageCollectionsModal() {
                 if (event.key === 'Enter') handleCreate()
               }}
               type="text"
+              data-autofocus
               placeholder="新建收藏夹..."
               className="min-w-0 flex-1 rounded-xl border border-gray-300 bg-transparent px-4 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-1 focus:ring-blue-500 dark:border-white/10 dark:text-white dark:focus:border-white/30 dark:focus:ring-white/30"
             />

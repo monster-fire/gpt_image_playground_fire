@@ -11,19 +11,17 @@
 **基于 OpenAI gpt-image-2.5 API 的图片生成与编辑工具**
 
 提供简洁精美的 Web UI，支持 OpenAI / OpenAI 兼容接口、sub2api（异步）、fal.ai 与可导入的自定义 HTTP 供应商。<br>
-支持文本生图、参考图与遮罩编辑，数据纯本地化存储，带来流畅的历史记录与参数管理体验。
+当前自部署版本需要通过 NAS / 服务器 Docker 运行，应用密码和私密 API 配置只保存在服务端环境变量与挂载目录中。
 
 <br>
 
-[![Vercel 在线体验](https://img.shields.io/badge/Vercel-%E5%9C%A8%E7%BA%BF%E4%BD%93%E9%AA%8C-black?style=for-the-badge&logo=vercel&logoColor=white)](https://gpt-image-playground.cooksleep.dev)
-&nbsp;&nbsp;&nbsp;
-[![GitHub Pages 在线体验](https://img.shields.io/badge/GitHub%20Pages-%E5%9C%A8%E7%BA%BF%E4%BD%93%E9%AA%8C-222222?style=for-the-badge&logo=github&logoColor=white)](https://cooksleep.github.io/gpt_image_playground)
+当前版本需要自行部署 Docker 服务端。
 
 </div>
 
 <br>
 
-> 💡 **提示**：若需调用非 HTTPS 的内网或本地 HTTP API，请使用 GitHub Pages 版本或自行部署，Vercel 部署的体验版绑定的 `.dev` 域名因安全策略通常要求接口必须为 HTTPS。
+> 提示：当前版本必须有 Node 服务端，纯静态托管无法提供登录、NAS 配置读写和同源代理接口。
 
 ---
 
@@ -141,12 +139,12 @@
 - **智能尺寸控制**：提供 1K/2K/4K 快速预设，自定义宽高时会自动规整至模型安全范围（16 的倍数、总像素校验等）。
 - **实际参数对比**：自动提取 API 响应中真实生效的尺寸、质量、耗时以及**模型改写后的提示词**，与你的请求参数高亮对比。支持定制化的参数列表横向平滑滚动体验。
 
-### 📁 高效历史管理 (纯本地)
+### 📁 高效历史管理与 NAS 配置
 - **瀑布流与画廊**：历史任务自动保存，支持按状态过滤、全屏大图预览与快捷下载。
 - **多收藏夹管理**：支持创建多个命名收藏夹，同一任务可归入多个收藏夹。提供独立的收藏夹概览视图（展示封面缩略图与任务数量），点击进入具体收藏夹后仍可叠加搜索与状态筛选。收藏夹支持拖拽排序、重命名、设置默认收藏夹，以及按收藏夹为单位批量打包下载 ZIP。
 - **快捷批量操作**：桌面端支持鼠标拖拽框选、Ctrl/⌘ 连选，移动端支持顺滑侧滑多选；轻松实现批量收藏与清理。
 - **优化的图片查看与下载**：大图预览支持左右滑动切换、移动端长按弹出操作菜单，支持快捷下载与批量下载。
-- **极致性能与隐私**：所有记录与图片均存放在浏览器 IndexedDB 中（采用 SHA-256 去重压缩），不经过任何第三方服务器。支持一键打包导出 ZIP 备份。
+- **私密配置隔离**：Docker 部署会先通过服务端密码登录，再从 NAS 挂载目录读取 API 配置；供应商 Key 不会写入静态 JS 包。浏览器仍会使用本机 IndexedDB 保存画廊、图片缓存与交互状态，支持一键打包导出 ZIP 备份。
 
 ### 🔌 多配置与供应商增强
 - **多配置管理**：支持创建并保存多个 API 配置（包含供应商、API Key、模型等），按需快速切换；支持一键复制当前配置到列表底部，并通过拖拽对配置列表与供应商列表进行自定义排序。
@@ -162,243 +160,104 @@
 
 ## 🚀 部署与使用
 
-支持多种部署与开发方式。
+当前版本必须通过 NAS / 服务器 Docker 或本地 Node 服务端运行。纯静态托管无法提供 `/api/auth/*`、`/api/api-config` 和 `/api-proxy/*`，因此不支持 Vercel、GitHub Pages、Cloudflare Workers 或普通静态 Nginx 作为私密实例。
 
 <a id="preset-config"></a>
-### 预置配置说明
+### 配置保存方式
 
-所有部署方式都可以通过环境变量提供“预置配置”——部署端预先加入用户配置列表的 API 配置。用户打开页面时会自动看到这些配置，无需手动创建，格式和用户自己创建的配置完全一致。
+登录密码由服务端环境变量 `APP_PASSWORD` 提供。API 配置由服务端读写 `API_CONFIG_PATH`，Docker 默认路径是 `/config/gpt-image-playground.json`。不要使用 `VITE_DEFAULT_API_URL`、`DEFAULT_API_URL` 或远程 JSON 文件把私密配置注入静态包。
 
-环境变量的值支持三种填写方式：
-
-| 填写方式 | 说明 | 示例 |
-|------|------|------|
-| **直接填写 API 地址** | 自动创建一个 OpenAI 兼容的默认预置配置（ID 为 `default-openai`）并注入 API URL，其余参数（模型、超时等）使用应用默认值，用户只需补充 API Key。末尾带 `/` 时直接拼接接口，不补 `/v1` 前缀。适合只提供一个配置的部署。后续如需通过 JSON 或链接更新此配置，指定 `id` 为 `default-openai` 即可。 | `https://api.openai.com/v1` |
-| **API 地址 + 查询参数** | 在地址后追加参数，可同时预填 Key、模型等字段。 | `https://api.openai.com/v1?model=gpt-image-2.5-sunburst&apiMode=images` |
-| **JSON 配置文件 / 导入链接** | 通过仓库内或本地的 JSON 文件路径（如 `./config.json`）、远程 URL 或含 `?settings=` 参数的导入链接提供完整预置配置，支持预置多个配置（OpenAI 兼容、sub2api（异步）、fal.ai 或自定义供应商）。 | 详见 [预置配置 JSON 格式](#preset-config-json) |
-
-**环境变量一览**
-
-部署时可以通过设置环境变量来控制预置配置和客户端行为。有关 Docker 专属的网络与代理配置（如 `ENABLE_API_PROXY` 等），请参考下方的 [Docker 部署](#docker-deployment) 章节。
-
-| 构建时变量 (Vercel/CF/本地) | Docker 运行变量 | 功能说明 |
-|------|------|------|
-| `VITE_DEFAULT_API_URL` | `DEFAULT_API_URL` | 设定预置配置值（支持 URL 形式或 JSON 格式，详见 [预置配置 JSON 格式](#preset-config-json)） |
-| `VITE_LOCK_PRESET_CONFIG_PARAMS=true` | `LOCK_PRESET_CONFIG_PARAMS=true` | 锁定预置配置中除 API Key 外的参数，并禁止编辑预置供应商定义；当前锁定配置引用的供应商不可删除，解除引用后可删除 |
-| `VITE_PREVENT_PRESET_CONFIG_DELETION=true` | `PREVENT_PRESET_CONFIG_DELETION=true` | 禁止删除预置配置和预置供应商，不锁定参数；普通项不受影响 |
-| `VITE_SHOW_PRESET_CONFIG_ONLY=true` | `SHOW_PRESET_CONFIG_ONLY=true` | 只允许使用当前预置配置，禁止创建、复制、删除、拖动、切换供应商和管理自定义供应商；未同时开启锁定时参数仍可编辑，API Key 始终可编辑 |
-
-> **未开启上述限制时的默认行为**：
-> - **参数更新**：API 地址、模型、超时等参数会与上一次部署快照比较；部署值发生变化时覆盖一次本地值，之后保留用户的本地修改，直到部署值再次变更。
-> - **API Key**：始终由用户在本地管理，重新部署不覆盖。
-> - **排序与删除**：预置配置可拖动；预置配置和预置供应商均允许删除，删除状态保存在浏览器中，重新部署不会恢复。
-> - **下线预置清理**：部署端移除某个预置后，若用户从未修改过该配置且没有历史生成任务引用，会自动从本地删除；若已被修改或仍被历史任务引用，则保留并转为普通配置。
-> - **失效供应商清理**：随预置引入的自定义供应商在不再被任何配置使用、且从未被用户修改时，也会自动清理。
-
-> 兼容提示：旧变量 `VITE_SHOW_DEFAULT_CONFIG_ONLY`／`SHOW_DEFAULT_CONFIG_ONLY` 仍可使用，等同于对应的 `SHOW_PRESET_CONFIG_ONLY`。
-
-### 部署方式
-
-<details>
-<summary><strong>▲ 方式一：Vercel 一键部署 (推荐)</strong></summary>
-
-支持通过 Vercel 一键导入 GitHub 仓库并自动完成构建部署。
-
-**预置配置**
-
-在 Vercel 项目的 **Settings → Environment Variables** 中设置 `VITE_DEFAULT_API_URL`，支持上述三种填写方式，可直接填写 API 地址或指定配置文件路径（如仓库内的 [`gpt-image-config.example.json`](gpt-image-config.example.json) 模板）。详见 [预置配置说明](#preset-config)。
-
-```dotenv
-VITE_DEFAULT_API_URL=https://api.openai.com/v1
-```
-
-**初始部署**
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FCookSleep%2Fgpt_image_playground&project-name=gpt-image-playground&repository-name=gpt-image-playground)
-
-点击上方按钮导入仓库即可，Vercel 会自动执行构建并部署静态文件。添加或修改环境变量后需要重新部署。
-
-**绑定自定义域名 (国内直连)**：Vercel 默认分配的 `.vercel.app` 域名在国内通常无法直接访问。如果你希望在国内直连访问，请在 Vercel 项目的 **Settings → Domains** 中绑定你自己的域名。
-
-**更新方式**
-
-本项目已在 `vercel.json` 中关闭了默认的自动部署。若你 Fork 了本仓库，建议配置 Deploy Hook 以实现新版本自动构建：
-
-1. 在 Vercel 项目的 **Settings → Git → Deploy Hooks** 中创建一个名为 `Release` 的 Hook（Branch 填 `main`）并复制生成的 URL。
-2. 在你 Fork 的 GitHub 仓库 **Settings → Secrets and variables → Actions** 中，新建 Secret `VERCEL_DEPLOY_HOOK`，填入刚才的 URL。
-
-配置完成后：
-- **自动更新**：只有在本仓库发布了正式版本（即包含新 Release / 版本号变动）时，在你的 Fork 页面点击 **Sync fork** 才会自动触发 Vercel 构建部署；日常的普通代码提交不会触发部署。
-- **手动触发**：若需立即部署最新代码（包括未发布正式版本的日常提交），可进入仓库顶部的 **Actions** 标签页，在左侧选择 **Deploy to Vercel**，点击右侧的 **Run workflow** 下拉按钮（分支选择 `main`），点击绿色的 **Run workflow** 按钮即可手动部署。
-
-</details>
-
-<details>
-<summary><strong>🌐 方式二：GitHub Pages 部署</strong></summary>
-
-支持通过 GitHub Actions 工作流将静态页面发布至 GitHub Pages。
-
-**预置配置**
-
-在仓库 **Settings → Secrets and variables → Actions** 中添加 Secret `VITE_DEFAULT_API_URL`，支持上述三种填写方式，可直接填写 API 地址或指定配置文件路径（如仓库内的 [`gpt-image-config.example.json`](gpt-image-config.example.json) 模板）。详见 [预置配置说明](#preset-config)。
-
-```dotenv
-VITE_DEFAULT_API_URL=https://api.openai.com/v1
-```
-
-**初始部署**
-
-1. 在 GitHub 仓库的 **Settings → Pages** 中，将 **Build and deployment → Source** 设置为 **GitHub Actions**。
-2. 进入仓库顶部的 **Actions** 标签页，在左侧选择 **Deploy to GitHub Pages**，点击右侧的 **Run workflow** 下拉按钮（分支选择 `main`），点击绿色的 **Run workflow** 按钮完成首次构建部署。
-
-**更新方式**
-
-- **自动更新**：只有在本仓库发布了正式版本（即包含新 Release / 版本号变动）时，在你的 Fork 页面点击 **Sync fork** 才会自动触发构建并部署至 GitHub Pages；日常的普通代码提交不会触发部署。
-- **手动触发**：若需立即部署最新代码（包括未发布正式版本的日常提交），可进入仓库顶部的 **Actions** 标签页，在左侧选择 **Deploy to GitHub Pages**，点击右侧的 **Run workflow** 下拉按钮（分支选择 `main`），点击绿色的 **Run workflow** 按钮即可手动部署。
-
-</details>
-
-<details>
-<summary><strong>☁️ 方式三：Cloudflare Workers 部署</strong></summary>
-
-支持通过内置的 Wrangler 配置将构建产物作为静态资源部署至 Cloudflare Workers。
-
-**预置配置**
-
-在执行构建前设置环境变量 `VITE_DEFAULT_API_URL`，支持上述三种填写方式，可直接填写 API 地址或指定配置文件路径（如仓库内的 [`gpt-image-config.example.json`](gpt-image-config.example.json) 模板）。Cloudflare Workers 不会在部署后改写静态文件，因此必须在构建前完成设置。详见 [预置配置说明](#preset-config)。
-
-```dotenv
-VITE_DEFAULT_API_URL=https://api.openai.com/v1
-```
-
-**部署**
-
-**1. 登录 Cloudflare**
-
-```bash
-npx wrangler login
-```
-
-**2. 部署到 Workers**
-
-```bash
-npm run deploy:cf
-```
-
-部署脚本会先执行 `npm run build`，再通过 `wrangler deploy` 上传 `dist/` 目录。
-
-</details>
+登录后在设置页保存供应商配置。保存动作会调用 `/api/api-config`，直接修改 NAS 或宿主机挂载目录中的配置文件。
 
 <a id="docker-deployment"></a>
-<details>
-<summary><strong>🐳 方式四：Docker 部署</strong></summary>
+### Docker / NAS 部署
 
-支持通过官方发布的 Docker 镜像在服务器或本地容器环境中快速运行。
+Docker 是当前推荐部署方式。容器内同时运行 Nginx 与 Node 服务端：Nginx 提供前端页面，Node 提供登录、会话、NAS 配置文件读写和同源 API 代理。生产环境必须设置 `APP_PASSWORD`，否则容器会直接退出。
 
 **环境变量**
 
 | 变量 | 说明 |
 |------|------|
-| `DEFAULT_API_URL` | 预置配置，支持上述三种填写方式。若值指向 `.json` 文件或容器内路径，容器启动时自动读取并内嵌到页面。宿主机文件需通过 volume 挂载。详见 [预置配置说明](#preset-config) |
-| `ENABLE_API_PROXY=true` | 开启 Nginx 同源代理，请求发往 `/api-proxy/{路径}` 再转发到 `API_PROXY_URL` |
-| `API_PROXY_URL` | 代理转发的完整 API 基础地址（不自动补 `/v1`） |
-| `LOCK_API_PROXY=true` | 强制锁定代理为开启，用户无法关闭 |
-| `HOST` / `PORT` | Nginx 监听地址和端口，默认 `0.0.0.0:80` |
+| `APP_PASSWORD` | 必填。应用登录密码，只在服务端读取，不会写入静态文件 |
+| `APP_ORIGIN` | 浏览器访问本应用的完整源，例如 `http://192.168.0.121:11130`；反向代理或 HTTPS 域名部署时建议显式填写 |
+| `COOKIE_SECURE` | HTTPS 部署保持 `true`；内网 HTTP 测试设为 `false`，否则浏览器不会回传安全 Cookie |
+| `API_CONFIG_PATH` | API 配置文件路径，默认 `/config/gpt-image-playground.json`；应挂载到 NAS 或宿主机目录 |
+| `DATA_DIR` | 服务端运行数据目录，默认 `/data`；应挂载到 NAS 或宿主机目录 |
+| `ENABLE_API_PROXY` | 是否开启同源 `/api-proxy/` |
+| `API_PROXY_URL` | 代理转发的完整 API 基础地址，例如 `https://api.openai.com/v1` |
+| `LOCK_API_PROXY` | 强制锁定代理为开启，用户无法关闭 |
+| `HOST` / `PORT` | Nginx 监听地址和宿主机端口，compose 默认映射 `11130:80` |
 
-> 开启 API 代理后，任何人都能将你的服务器作为代理来请求目标 API。建议仅在有访问控制（如 IP 白名单）或本地网络中开启。
+`/api-proxy/` 会先校验应用登录会话和 CSRF，再转发到上游 API。仍建议只在内网、VPN 或带反向代理访问控制的环境中开放。
 
-> 旧版 `API_URL` 已拆分为 `DEFAULT_API_URL` 和 `API_PROXY_URL`，容器启动时自动兼容，无需立即修改。
+**Docker Compose**
 
-**隐藏真实 API 地址**
+仓库提供了 `compose.yaml` 和 `.env.example`。复制 `.env.example` 为 `.env` 后，修改 `APP_PASSWORD`、`APP_ORIGIN`、`API_PROXY_URL`，再启动：
 
-配合 `ENABLE_API_PROXY=true` + `LOCK_API_PROXY=true` 可隐藏上游地址：
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
 
-- OpenAI 兼容接口：`DEFAULT_API_URL` 留空或填占位地址（如 `https://proxy`）。
-- 自定义供应商：JSON 中配置的 `baseUrl` 留空并设置 `apiProxy: true`（仅支持同步配置）。
-
-用户只能看到空值或占位地址，真实地址仅存在于 `API_PROXY_URL`。
+compose 会把 `./config` 挂载到容器 `/config`，把 `./data` 挂载到容器 `/data`。NAS Docker 面板里可以把这两个宿主路径替换为 NAS 共享目录。API 配置写入 `/config/gpt-image-playground.json`，会话等服务端状态写入 `/data`。
 
 **Docker CLI 示例**
 
 ```bash
-docker run -d -p 8080:80 \
-  -e DEFAULT_API_URL=https://api.openai.com/v1 \
-  ghcr.io/cooksleep/gpt_image_playground:latest
-```
-
-开启代理并隐藏真实地址：
-
-```bash
-docker run -d -p 8080:80 \
-  -e DEFAULT_API_URL= \
-  -e API_PROXY_URL=https://real-api.example.com/v1 \
+docker run -d -p 11130:80 \
+  -e APP_PASSWORD=change-this-password \
+  -e APP_ORIGIN=http://192.168.0.121:11130 \
+  -e COOKIE_SECURE=false \
   -e ENABLE_API_PROXY=true \
-  -e LOCK_API_PROXY=true \
+  -e API_PROXY_URL=https://api.openai.com/v1 \
+  -v ./config:/config \
+  -v ./data:/data \
   ghcr.io/cooksleep/gpt_image_playground:latest
 ```
 
-挂载本地配置文件：
+使用 `latest` 标签时，重新拉取镜像并重启即可更新（如 `docker compose pull && docker compose up -d`）。
+
+### 本地开发
+
+本地开发也必须启动 Node 服务端，不能只运行 `npm run dev`。Vite 会把 `/api/` 和 `/api-proxy/` 代理到 `NAS_DEV_SERVER_URL`，默认是 `http://127.0.0.1:3000`。
+
+**1. 准备 .env**
+
+可以直接复制示例文件，再按本机地址修改：
 
 ```bash
-docker run -d -p 8080:80 \
-  -v ./gpt-image-config.json:/config/gpt-image-config.json:ro \
-  -e DEFAULT_API_URL=/config/gpt-image-config.json \
-  ghcr.io/cooksleep/gpt_image_playground:latest
+cp .env.example .env
 ```
-
-使用 host 网络加 `--network host`，修改端口用 `-e PORT=28080`。
-
-**Docker Compose 示例**
-
-```yaml
-services:
-  gpt-image-playground:
-    image: ghcr.io/cooksleep/gpt_image_playground:latest
-    environment:
-      - DEFAULT_API_URL=https://api.openai.com/v1
-    ports:
-      - "8080:80"
-    restart: unless-stopped
-```
-**更新说明：**
-
-使用 `latest` 标签时，重新拉取镜像并重启即可更新（如 `docker compose pull && docker compose up -d`）。若需固定版本可使用官方提供的版本号标签（如 `0.2.x`）。
-
-</details>
-
-<details>
-<summary><strong>💻 方式五：本地开发与静态构建</strong></summary>
-
-支持在本地通过 Node.js 环境运行开发服务器或构建生产静态文件。
-
-**1. 预置配置（可选）**
-
-在项目根目录新建 `.env.local` 文件，设置 `VITE_DEFAULT_API_URL`，支持上述三种填写方式，可直接填写 API 地址或指定配置文件路径（如仓库内的 [`gpt-image-config.example.json`](gpt-image-config.example.json) 模板）。详见 [预置配置说明](#preset-config)。
-
-开发服务器启动或构建时若值指向远程 `.json` 文件或本地路径，内容会自动内嵌到页面。
 
 ```dotenv
-VITE_DEFAULT_API_URL=https://api.openai.com/v1
+APP_PASSWORD=dev-password
+APP_ORIGIN=http://127.0.0.1:5173
+COOKIE_SECURE=false
+ENABLE_API_PROXY=true
+API_PROXY_URL=https://api.openai.com/v1
+API_CONFIG_PATH=./config/gpt-image-playground.json
+DATA_DIR=./data
+NAS_DEV_SERVER_URL=http://127.0.0.1:3000
 ```
 
-**2. 安装依赖并启动**
+`npm run start` 会通过 Node 的 `--env-file=.env` 读取上述服务端变量。Vite 会通过 `.env` 读取 `NAS_DEV_SERVER_URL`。
+
+**2. 终端一：启动服务端**
 
 ```bash
 npm install
+npm run start
+```
+
+**3. 终端二：启动前端开发服务器**
+
+```bash
 npm run dev
 ```
 
-**3. 本地开发跨域代理 (可选)**
+打开 Vite 输出的地址，输入 `APP_PASSWORD` 登录。开发模式下不要使用 `dev-proxy.config.json` 保存真实上游地址；如需同源代理，使用 `API_PROXY_URL` 并在应用设置中开启 API 代理。
 
-如果在本地开发时遇到浏览器的 CORS 限制，可开启本地代理转发：
-
-```bash
-cp dev-proxy.config.example.json dev-proxy.config.json
-```
-
-修改 `dev-proxy.config.json`，将 `target` 设置为真实的完整 API 基础地址。代理不会自动补 `/v1`，OpenAI 兼容接口通常必须填写到版本前缀，如 `https://api.example.com/v1`。重启开发服务器后，在页面设置中开启 **API 代理** 即可（请求将被转发如 `http://localhost:5173/api-proxy/... -> target/...`）。此功能仅在 `npm run dev` 阶段生效，不会影响打包产物。
-
-**4. 本地故障模拟 API (可选)**
+**4. 本地故障模拟 API（可选）**
 
 如果需要复现图片 URL 跨域、接口返回结构异常、原始响应查看等问题，可启动内置模拟服务：
 
@@ -408,22 +267,12 @@ npm run mock:api
 
 使用方式见 [本地故障模拟 API](docs/mock-image-api.md)。
 
-**5. 构建静态产物**
-
-```bash
-npm run build
-```
-
-构建输出的文件位于 `dist/` 目录下，可将其部署至任何静态文件服务器（如普通 Nginx、GitHub Pages、Netlify 等）。
-
-</details>
-
 ---
 
 <a id="url-quick-fill"></a>
 ## 🛠️ URL 传参快速填充
 
-通过 URL 查询参数快速填入 OpenAI 兼容配置，适合创建书签或集成分享。
+通过 URL 查询参数快速填入 OpenAI 兼容配置，适合在当前已登录实例内临时导入设置。不要把包含真实 API Key 的 URL 发到第三方站点或公开页面。
 
 | 参数 | 说明 | 示例 |
 |------|------|------|
@@ -440,20 +289,16 @@ npm run build
 | `profileId` | 目标配置 ID；匹配到同 ID 配置时直接更新 | `?profileId=my-service` |
 | `transparentBackgroundMethod` | 透明背景实现方式：`api`（原生）或 `local`（本地后处理） | `?transparentBackgroundMethod=local` |
 
-集成示例（New API 聊天系统）：
+示例：
 
 ```text
-https://gpt-image-playground.cooksleep.dev?apiUrl={address}&apiKey={key}&model={model}
-```
-
-```text
-https://cooksleep.github.io/gpt_image_playground?apiUrl={address}&apiKey={key}&model={model}
+http://你的NAS地址:11130?apiUrl={address}&model={model}
 ```
 
 <a id="preset-config-json"></a>
-## 📋 预置配置 JSON 格式
+## 📋 配置 JSON 格式
 
-使用 JSON 文件或分享链接提供预置配置时，JSON 对象包含两个顶层字段：
+使用 JSON 文件或分享链接导入配置时，JSON 对象包含两个顶层字段：
 
 - **`customProviders`**（数组）：自定义供应商定义。如果只使用内置供应商（OpenAI 兼容、sub2api（异步）或 fal.ai），此数组留空 `[]` 即可。
 - **`profiles`**（数组）：预置的 API 配置列表。每项对应用户配置页中的一个配置条目。
@@ -526,47 +371,9 @@ https://cooksleep.github.io/gpt_image_playground?apiUrl={address}&apiKey={key}&m
 }
 ```
 
-### 如何将预置配置提供给环境变量
+### 配置导入与迁移
 
-预置配置 JSON 可以通过以下三种方式填入部署环境变量（`VITE_DEFAULT_API_URL` 或 Docker 的 `DEFAULT_API_URL`）：
-
-**1. 导入链接（单配置导入，最简单）**
-
-在项目的 [Vercel 在线体验](https://gpt-image-playground.cooksleep.dev) 或 [GitHub Pages 在线体验](https://cooksleep.github.io/gpt_image_playground) 中配置好某个条目后，点击“链接”按钮复制含 `?settings=` 参数的 URL（请勿勾选任何“New API 变量配置”选项），直接填入环境变量即可。
-
-
-> 💡 **提示**：页面中的“复制导入配置 URL”按钮导出的是**当前选中的单个配置**及其关联的自定义供应商。如需一次性预置包含多个服务商的列表，请使用下方的本地/仓库文件或远程 URL 方式。
-
-```dotenv
-VITE_DEFAULT_API_URL=https://你的域名?settings=%7B%22customProviders%22%3A%5B...%5D%2C%22profiles%22%3A%5B...%5D%7D
-```
-
-**2. 仓库内／本地配置文件（推荐）**
-
-支持直接指定仓库根目录或本地文件相对路径（如 `./gpt-image-config.example.json` 或 `./config/my-presets.json`），构建时会自动读取并内嵌到静态页面中。
-
-```dotenv
-VITE_DEFAULT_API_URL=./gpt-image-config.example.json
-```
-
-Docker 需要通过 volume 挂载宿主机文件到容器内路径：
-
-```bash
-docker run -d -p 8080:80 \
-  -v ./gpt-image-config.json:/config/gpt-image-config.json:ro \
-  -e DEFAULT_API_URL=/config/gpt-image-config.json \
-  ghcr.io/cooksleep/gpt_image_playground:latest
-```
-
-> Docker 环境变量名为 `DEFAULT_API_URL`（不含 `VITE_` 前缀）。
-
-**3. HTTP／HTTPS 远程配置文件**
-
-将 JSON 保存到部署服务器能够访问的 URL（可位于内网，不要求用户浏览器能访问）。构建时或容器启动时会自动读取并内嵌到页面。
-
-```dotenv
-VITE_DEFAULT_API_URL=https://example.com/gpt-image-config.json
-```
+如需从旧实例或其他环境迁移配置，请在应用设置页使用导入/导出功能。导入后点击保存，服务端会把配置写入 `API_CONFIG_PATH` 指向的 NAS 文件。不要再把配置 JSON 放进 `VITE_DEFAULT_API_URL`、`DEFAULT_API_URL` 或静态托管环境变量。
 
 ---
 
@@ -579,8 +386,8 @@ VITE_DEFAULT_API_URL=https://example.com/gpt-image-config.json
 
 **创建方式：**
 
-1. **在线体验中生成**：打开 [Vercel 在线体验](https://gpt-image-playground.cooksleep.dev) 或 [GitHub Pages 在线体验](https://cooksleep.github.io/gpt_image_playground)，进入 **设置 → API 配置 → 供应商类型 → 创建自定义供应商 → AI 一键生成与导入**，粘贴第三方 API 文档让 AI 生成配置。
-2. **应用内导出**：生成完成后，在 **API 配置 → 当前配置** 右侧点击“链接按钮”复制含 `?settings=` 参数的分享 URL，可直接用作环境变量值。
+1. **当前实例中生成**：登录自己的 NAS / Docker 实例，进入 **设置 → API 配置 → 供应商类型 → 创建自定义供应商 → AI 一键生成与导入**，粘贴第三方 API 文档让 AI 生成配置。
+2. **应用内导出**：生成完成后，在 **API 配置 → 当前配置** 右侧点击“链接按钮”复制含 `?settings=` 参数的分享 URL，可导入到另一个已登录实例。
 
 也可以参考 [自定义供应商 LLM 提示词](docs/custom-provider-llm-prompt.md)，将提示词和第三方 API 文档直接发给任意 LLM，手动获取完整 JSON。
 

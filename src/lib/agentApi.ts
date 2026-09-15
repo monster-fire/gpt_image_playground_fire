@@ -637,6 +637,7 @@ async function parseAgentStreamResponse(
 }
 
 export async function callAgentResponsesApi(opts: {
+  presetContent?: string
   settings: AppSettings
   profile: ApiProfile
   imageProfile?: ApiProfile
@@ -661,7 +662,10 @@ export async function callAgentResponsesApi(opts: {
   try {
     const body: Record<string, unknown> = {
       model: profile.model,
-      instructions: createAgentInstructions(settings, (imageProfile ?? profile).codexCli ? params.size : undefined),
+      instructions: [
+        opts.presetContent ? `本轮角色与风格默认要求：\n${opts.presetContent}\n以用户本次明确要求为准。根据需求补全适用细节并写入图片工具提示词；要求出图时调用工具，仅讨论或只要提示词时遵循用户要求。` : '',
+        createAgentInstructions(settings, (imageProfile ?? profile).codexCli ? params.size : undefined),
+      ].filter(Boolean).join('\n\n'),
       input,
       tools: createAgentTools(params, profile, settings, maskDataUrl),
     }

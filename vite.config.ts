@@ -43,11 +43,11 @@ async function embedDefaultConfig(value: string) {
 
 export default defineConfig(async ({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const nasAuthEnabled = (process.env.VITE_NAS_AUTH_ENABLED ?? env.VITE_NAS_AUTH_ENABLED) === 'true'
+  const nasAuthEnabled = mode !== 'test' || (process.env.VITE_NAS_AUTH_ENABLED ?? env.VITE_NAS_AUTH_ENABLED) === 'true'
   const defaultApiUrl = nasAuthEnabled ? '' : await embedDefaultConfig(process.env.VITE_DEFAULT_API_URL ?? env.VITE_DEFAULT_API_URL ?? '')
   if (nasAuthEnabled) process.env.VITE_DEFAULT_API_URL = ''
   if (defaultApiUrl.startsWith('embedded-config:')) process.env.VITE_DEFAULT_API_URL = defaultApiUrl
-  const devProxyConfig = command === 'serve' ? loadDevProxyConfig() : null
+  const devProxyConfig = command === 'serve' && !nasAuthEnabled ? loadDevProxyConfig() : null
 
   return {
     plugins: [react()],
@@ -55,11 +55,13 @@ export default defineConfig(async ({ command, mode }) => {
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version),
       __DEV_PROXY_CONFIG__: JSON.stringify(devProxyConfig),
+      ...(command === 'serve' && nasAuthEnabled ? { 'import.meta.env.VITE_API_PROXY_AVAILABLE': JSON.stringify(env.ENABLE_API_PROXY === 'true' ? 'true' : 'false') } : {}),
     },
     server: {
       host: true,
-      proxy:
-        devProxyConfig?.enabled
+      proxy: {
+        '/api/': { target: env.NAS_DEV_SERVER_URL || 'http://127.0.0.1:3000', changeOrigin: false },
+        ...(nasAuthEnabled ? { '/api-proxy/': { target: env.NAS_DEV_SERVER_URL || 'http://127.0.0.1:3000', changeOrigin: false } } : devProxyConfig?.enabled
           ? {
               [devProxyConfig.prefix]: {
                 target: devProxyConfig.target,
@@ -72,7 +74,8 @@ export default defineConfig(async ({ command, mode }) => {
                   ),
               },
             }
-          : undefined,
+          : {}),
+      },
     },
   }
 })

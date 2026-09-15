@@ -33,6 +33,7 @@ function normalizeAgentRound(value: unknown, fallbackIndex: number): AgentRound 
     userMessageId: round.userMessageId,
     ...(typeof round.assistantMessageId === 'string' ? { assistantMessageId: round.assistantMessageId } : {}),
     prompt: typeof round.prompt === 'string' ? round.prompt : '',
+    promptPreset: round.promptPreset && typeof round.promptPreset.id === 'string' && typeof round.promptPreset.name === 'string' && typeof round.promptPreset.content === 'string' && typeof round.promptPreset.revision === 'string' ? round.promptPreset : null,
     inputImageIds: normalizeStringArray(round.inputImageIds),
     maskTargetImageId: typeof round.maskTargetImageId === 'string' ? round.maskTargetImageId : null,
     maskImageId: typeof round.maskImageId === 'string' ? round.maskImageId : null,
@@ -109,6 +110,7 @@ export function normalizeAgentConversations(value: unknown): AgentConversation[]
         : []
       return {
         id: conversation.id,
+        promptPresetId: typeof conversation.promptPresetId === 'string' ? conversation.promptPresetId : null,
         title: typeof conversation.title === 'string' && conversation.title.trim() ? conversation.title : '新对话',
         activeRoundId: typeof conversation.activeRoundId === 'string' && roundIds.has(conversation.activeRoundId) ? conversation.activeRoundId : rounds[rounds.length - 1]?.id ?? null,
         createdAt: typeof conversation.createdAt === 'number' ? conversation.createdAt : Date.now(),

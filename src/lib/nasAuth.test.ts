@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { checkNasSession, expireNasSession, nasFetch, providerFetch, setNasSession } from './nasAuth'
+import { checkNasSession, expireNasSession, isNasAuthEnabled, nasFetch, providerFetch, setNasSession } from './nasAuth'
 
 const browser = Object.assign(new EventTarget(), { location: { href: 'http://nas:11130/', origin: 'http://nas:11130' } })
 beforeEach(() => {
@@ -10,6 +10,18 @@ beforeEach(() => {
 afterEach(() => { expireNasSession(); vi.unstubAllGlobals(); vi.unstubAllEnvs() })
 
 describe('NAS session and supplier separation', () => {
+  it('enables NAS auth outside test mode even when the env flag is absent', () => {
+    vi.stubEnv('MODE', 'production')
+    vi.stubEnv('VITE_NAS_AUTH_ENABLED', '')
+    expect(isNasAuthEnabled()).toBe(true)
+  })
+  it('allows disabling NAS auth only in test mode', () => {
+    vi.stubEnv('MODE', 'test')
+    vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'false')
+    expect(isNasAuthEnabled()).toBe(false)
+    vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'true')
+    expect(isNasAuthEnabled()).toBe(true)
+  })
   it('adds CSRF only to local NAS writes', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response('{}'))
     vi.stubGlobal('fetch', fetcher)

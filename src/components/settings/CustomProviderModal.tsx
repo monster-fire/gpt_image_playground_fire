@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
+import { useDialogFocus } from '../../hooks/useDialogFocus'
 import ViewportTooltip from '../ViewportTooltip'
 import { CloseIcon, LinkIcon } from '../icons'
 
@@ -29,7 +30,9 @@ export default function CustomProviderModal({
   onSave,
 }: CustomProviderModalProps) {
   const llmPromptTooltipTimerRef = useRef<number | null>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
   const [llmPromptTooltipVisible, setLlmPromptTooltipVisible] = useState(false)
+  useDialogFocus(true, dialogRef)
 
   const clearLlmPromptTooltipTimer = () => {
     if (llmPromptTooltipTimerRef.current == null) return
@@ -42,15 +45,23 @@ export default function CustomProviderModal({
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm animate-overlay-in" onClick={onClose} />
-      <div className="relative z-10 w-full max-w-md rounded-3xl border border-white/50 bg-white/95 p-5 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10 flex flex-col h-[85vh] sm:h-[680px] max-h-[90vh] overflow-hidden">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="custom-provider-title"
+        tabIndex={-1}
+        className="relative z-10 w-full max-w-md rounded-3xl border border-white/50 bg-white/95 p-5 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10 flex flex-col h-[85vh] sm:h-[680px] max-h-[90vh] overflow-hidden"
+      >
         <div className="mb-5 flex items-center justify-between gap-4 shrink-0">
-          <h3 className="text-base font-bold text-gray-800 dark:text-gray-100">
+          <h3 id="custom-provider-title" className="text-base font-bold text-gray-800 dark:text-gray-100">
             {editing ? '编辑自定义服务商' : '创建自定义服务商'}
           </h3>
           <div className="flex items-center gap-3">
             <button
               type="button"
               onClick={onClose}
+              data-autofocus
               className="rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
               aria-label="关闭"
             >

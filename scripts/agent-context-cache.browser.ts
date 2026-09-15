@@ -10,7 +10,7 @@ export async function seedLegacyDatabase() {
     const request = indexedDB.open('gpt-image-playground', 3)
     request.onupgradeneeded = () => {
       for (const name of ['images', 'thumbnails', 'tasks', 'agentConversations']) {
-        request.result.createObjectStore(name, { keyPath: 'id' })
+        if (!request.result.objectStoreNames.contains(name)) request.result.createObjectStore(name, { keyPath: 'id' })
       }
       request.transaction!.objectStore('tasks').put({ id: 'legacy-task', prompt: 'preserve' })
     }
@@ -82,4 +82,32 @@ export async function afterReload() {
     check(!await db.getImage('race') && !await db.getAgentContextImage('race'), 'delete/write race left orphan')
   }
   return { reloadReuse: true, incrementalCompression: true, deleteCascade: true, clearCascade: true, lateWriteRejected: true, replacementInvalidation: true, concurrentDeletion: true }
+}
+
+export async function measureIncrementalPreparation() {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 768
+  const ctx = canvas.getContext('2d')!
+  const pixels = ctx.createImageData(768, 768)
+  let seed = 39
+  for (let i = 0; i < pixels.data.length; i++) {
+    seed = Math.imul(seed, 1664525) + 1013904223
+    pixels.data[i] = i % 4 === 3 ? 255 : seed >>> 24
+  }
+  ctx.putImageData(pixels, 0, 0)
+  const original = canvas.toDataURL('image/png')
+  const ids = Array.from({ length: 16 }, (_, index) => `benchmark-${index}`)
+  for (const id of ids) await db.putImage({ id, dataUrl: original, createdAt: 1 })
+  const results = []
+  for (const [phase, count, expectedHits, expectedProcessed] of [
+    ['cold', 14, 0, 14], ['warm', 14, 14, 0], ['incremental', 16, 14, 2],
+  ] as const) {
+    let progress = { checked: 0, cacheHits: 0, processed: 0 }
+    const start = performance.now()
+    const loader = createAgentContextImageLoader(async (id) => (await db.getImage(id))?.dataUrl, undefined, { total: count, onProgress: (value) => { progress = value } })
+    for (const id of ids.slice(0, count)) await loader(id)
+    check(progress.checked === count && progress.cacheHits === expectedHits && progress.processed === expectedProcessed, `${phase} image progress is incorrect`)
+    results.push({ phase, milliseconds: Math.round(performance.now() - start), ...progress })
+  }
+  return results
 }

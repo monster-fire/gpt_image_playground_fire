@@ -7,15 +7,34 @@ import { getDataUrlDecodedByteSize } from './imageApiShared'
 
 type ZipFiles = Record<string, Uint8Array | [Uint8Array, { mtime: Date; level?: 0 }]>
 
+export type ExportPromptPreset = {
+  id: string
+  name: string
+  content: string
+  revision?: string
+  createdAt?: number
+  updatedAt?: number
+}
+
+export type ExportZipManifest = ExportData & {
+  promptPresets?: ExportPromptPreset[]
+}
+
 export const MAX_EXPORT_ZIP_BYTES = 2 * 1024 * 1024 * 1024
 const DEFAULT_EXPORT_PART_BYTES = 256 * 1024 * 1024
 const EXPORT_PART_SAFETY_BYTES = 128 * 1024 * 1024
 const ZIP_BASE_OVERHEAD_BYTES = 1024 * 1024
 const ZIP_ENTRY_OVERHEAD_BYTES = 1024
+const API_SETTING_FIELDS = ['profiles', 'customProviders', 'providerOrder', 'activeProfileId', 'agentApiConfigMode', 'agentTextProfileId', 'agentImageProfileId'] as const
+const PREFERENCE_SETTING_FIELDS = ['clearInputAfterSubmit', 'persistInputOnRestart', 'reuseTaskApiProfileTemporarily', 'alwaysShowRetryButton', 'allowPromptRewrite', 'taskCompletionNotification', 'enterSubmit', 'zipDownloadRoutes', 'agentScrollToBottomAfterSubmit', 'agentMaxToolRounds', 'agentWebSearch', 'agentMathFormattingPrompt'] as const
 
 export interface BuildExportZipOptions {
   exportConfig?: boolean
   exportTasks?: boolean
+  exportImages?: boolean
+  exportThumbnails?: boolean
+  exportPreferences?: boolean
+  exportPromptPresets?: boolean
 }
 
 export interface BuildExportZipParams {
@@ -28,13 +47,14 @@ export interface BuildExportZipParams {
   favoriteCollections: FavoriteCollection[]
   defaultFavoriteCollectionId: string | null
   agentConversations: AgentConversation[]
+  promptPresets?: ExportPromptPreset[]
   imageTasks?: TaskRecord[]
   includeManifestData?: boolean
   backupPart?: ExportData['backupPart']
 }
 
 export interface ExportZipContents {
-  manifest: ExportData
+  manifest: ExportZipManifest
   files: Record<string, Uint8Array>
 }
 
@@ -55,32 +75,42 @@ export async function buildExportZip(params: BuildExportZipParams) {
   const imageTasks = params.options.exportTasks ? params.imageTasks ?? params.tasks : []
   const imageCreatedAtFallback = getImageCreatedAtFallback(imageTasks)
   const imageFileNameBases = getImageFileNameBases(imageTasks)
+  const includeImages = shouldExportImages(params.options)
+  const includeThumbnails = shouldExportThumbnails(params.options)
   const imageFiles: ExportData['imageFiles'] = {}
   const thumbnailFiles: NonNullable<ExportData['thumbnailFiles']> = {}
   const zipFiles: ZipFiles = {}
   const usedImagePaths = new Set<string>()
+  const usedThumbnailPaths = new Set<string>()
 
-  if (params.options.exportTasks) {
+  if (includeImages || includeThumbnails) {
     for (const img of params.images) {
-      const { ext, bytes } = dataUrlToBytes(img.dataUrl)
-      const path = getUniqueImagePath(imageFileNameBases.get(img.id) || `image-${img.id}`, ext, usedImagePaths)
-      const pathBase = path.slice('images/'.length, -(ext.length + 1))
+      const fileNameBase = imageFileNameBases.get(img.id) || `image-${img.id}`
       const createdAt = img.createdAt ?? imageCreatedAtFallback.get(img.id) ?? params.exportedAt
-      imageFiles[img.id] = {
-        path,
-        createdAt,
-        source: img.source,
-        width: img.width,
-        height: img.height,
+      let pathBase = sanitizeFileNamePart(fileNameBase) || 'image'
+
+      if (includeImages) {
+        const { ext, bytes } = dataUrlToBytes(img.dataUrl)
+        const path = getUniqueImagePath(fileNameBase, ext, usedImagePaths)
+        pathBase = path.slice('images/'.length, -(ext.length + 1))
+        imageFiles[img.id] = {
+          path,
+          createdAt,
+          source: img.source,
+          width: img.width,
+          height: img.height,
+        }
+        zipFiles[path] = [bytes, { mtime: new Date(createdAt), level: 0 }]
       }
-      zipFiles[path] = [bytes, { mtime: new Date(createdAt), level: 0 }]
 
       const thumbnail = params.thumbnailsByImageId.get(img.id)
-      if (thumbnail?.thumbnailDataUrl) {
+      if (includeThumbnails && thumbnail?.thumbnailDataUrl) {
         const { ext: thumbnailExt, bytes: thumbnailBytes } = dataUrlToBytes(thumbnail.thumbnailDataUrl)
-        const thumbnailPath = `thumbnails/${pathBase}.${thumbnailExt}`
-        imageFiles[img.id].width = imageFiles[img.id].width ?? thumbnail.width
-        imageFiles[img.id].height = imageFiles[img.id].height ?? thumbnail.height
+        const thumbnailPath = getUniquePath('thumbnails', pathBase, thumbnailExt, usedThumbnailPaths)
+        if (imageFiles[img.id]) {
+          imageFiles[img.id].width = imageFiles[img.id].width ?? thumbnail.width
+          imageFiles[img.id].height = imageFiles[img.id].height ?? thumbnail.height
+        }
         thumbnailFiles[img.id] = {
           path: thumbnailPath,
           width: thumbnail.width,
@@ -92,13 +122,15 @@ export async function buildExportZip(params: BuildExportZipParams) {
     }
   }
 
-  const manifest: ExportData = {
+  const manifest: ExportZipManifest = {
     version: 3,
     exportedAt: exportedAtDate.toISOString(),
   }
 
   if (params.backupPart) manifest.backupPart = params.backupPart
-  if (params.options.exportConfig && params.includeManifestData !== false) manifest.settings = params.settings
+  if (params.options.exportConfig && params.includeManifestData !== false) manifest.settings = getApiSettingsForExport(params.settings) as AppSettings
+  if (params.options.exportPreferences && params.includeManifestData !== false) manifest.preferences = getPreferencesForExport(params.settings)
+  if (params.options.exportPromptPresets && params.includeManifestData !== false) manifest.promptPresets = params.promptPresets ?? []
   if (params.options.exportTasks) {
     if (params.includeManifestData !== false || params.tasks.length) manifest.tasks = params.tasks
     if (params.includeManifestData !== false || params.agentConversations.length) manifest.agentConversations = params.agentConversations
@@ -106,7 +138,11 @@ export async function buildExportZip(params: BuildExportZipParams) {
       manifest.favoriteCollections = params.favoriteCollections
       manifest.defaultFavoriteCollectionId = params.defaultFavoriteCollectionId
     }
+  }
+  if (includeImages) {
     manifest.imageFiles = imageFiles
+  }
+  if (includeThumbnails) {
     manifest.thumbnailFiles = thumbnailFiles
   }
 
@@ -139,7 +175,7 @@ export function getExportZipPlan(
   const plannedConversations = params.options.exportTasks ? params.agentConversations : []
   const taskBytes = plannedTasks.map(getJsonEstimatedBytes)
   const conversationBytes = plannedConversations.map(getJsonEstimatedBytes)
-  const plannedImages = params.options.exportTasks ? images : []
+  const plannedImages = shouldExportImages(params.options) || shouldExportThumbnails(params.options) ? images : []
   const estimatedBytes = manifestBytes
     + taskBytes.reduce((total, bytes) => total + bytes, 0)
     + conversationBytes.reduce((total, bytes) => total + bytes, 0)
@@ -243,7 +279,9 @@ function getBaseManifestEstimatedBytes(params: Omit<BuildExportZipParams, 'image
   const manifest = {
     version: 3,
     exportedAt: new Date(params.exportedAt).toISOString(),
-    ...(params.options.exportConfig ? { settings: params.settings } : {}),
+    ...(params.options.exportConfig ? { settings: getApiSettingsForExport(params.settings) } : {}),
+    ...(params.options.exportPreferences ? { preferences: getPreferencesForExport(params.settings) } : {}),
+    ...(params.options.exportPromptPresets ? { promptPresets: params.promptPresets ?? [] } : {}),
     ...(params.options.exportTasks ? {
       tasks: [],
       favoriteCollections: params.favoriteCollections,
@@ -258,16 +296,31 @@ function getJsonEstimatedBytes(value: unknown) {
   return strToU8(JSON.stringify(value)).byteLength + ZIP_ENTRY_OVERHEAD_BYTES
 }
 
-export function getExportImageEstimatedBytes(image: StoredImage, thumbnail?: StoredImageThumbnail) {
-  return getDataUrlDecodedByteSize(image.dataUrl)
-    + (thumbnail?.thumbnailDataUrl ? getDataUrlDecodedByteSize(thumbnail.thumbnailDataUrl) : 0)
-    + ZIP_ENTRY_OVERHEAD_BYTES * (thumbnail?.thumbnailDataUrl ? 2 : 1)
+export function getExportImageEstimatedBytes(image: StoredImage, thumbnail?: StoredImageThumbnail, options: { includeImage?: boolean; includeThumbnail?: boolean } = { includeImage: true, includeThumbnail: Boolean(thumbnail?.thumbnailDataUrl) }) {
+  return (options.includeImage ? getDataUrlDecodedByteSize(image.dataUrl) + ZIP_ENTRY_OVERHEAD_BYTES : 0)
+    + (options.includeThumbnail && thumbnail?.thumbnailDataUrl ? getDataUrlDecodedByteSize(thumbnail.thumbnailDataUrl) + ZIP_ENTRY_OVERHEAD_BYTES : 0)
 }
 
 export function readExportZipFileAsDataUrl(files: Record<string, Uint8Array>, path: string): string | null {
   const bytes = files[path]
   if (!bytes) return null
   return bytesToDataUrl(bytes, path)
+}
+
+function shouldExportImages(options: BuildExportZipOptions) {
+  return options.exportImages ?? options.exportTasks ?? false
+}
+
+function shouldExportThumbnails(options: BuildExportZipOptions) {
+  return options.exportThumbnails ?? options.exportImages ?? options.exportTasks ?? false
+}
+
+export function getApiSettingsForExport(settings: AppSettings): Partial<AppSettings> {
+  return Object.fromEntries(API_SETTING_FIELDS.map((key) => [key, settings[key]])) as Partial<AppSettings>
+}
+
+export function getPreferencesForExport(settings: AppSettings): Partial<AppSettings> {
+  return Object.fromEntries(PREFERENCE_SETTING_FIELDS.map((key) => [key, settings[key]])) as Partial<AppSettings>
 }
 
 function getImageCreatedAtFallback(tasks: TaskRecord[]) {
@@ -313,11 +366,15 @@ function addImageFileNameBases(bases: Map<string, string>, imageIds: string[], f
 }
 
 function getUniqueImagePath(fileNameBase: string, ext: string, usedPaths: Set<string>) {
+  return getUniquePath('images', fileNameBase, ext, usedPaths)
+}
+
+function getUniquePath(dir: string, fileNameBase: string, ext: string, usedPaths: Set<string>) {
   const base = sanitizeFileNamePart(fileNameBase) || 'image'
-  let path = `images/${base}.${ext}`
+  let path = `${dir}/${base}.${ext}`
   let duplicateIndex = 2
   while (usedPaths.has(path)) {
-    path = `images/${base}-${String(duplicateIndex).padStart(2, '0')}.${ext}`
+    path = `${dir}/${base}-${String(duplicateIndex).padStart(2, '0')}.${ext}`
     duplicateIndex++
   }
   usedPaths.add(path)

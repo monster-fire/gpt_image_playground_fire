@@ -1,9 +1,15 @@
-import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect } from 'react'
+import { useRef, useEffect, useCallback, useState, useMemo, useLayoutEffect, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { deleteFavoriteCollection, useStore, submitTask, submitAgentMessage, stopAgentResponse, addImageFromFile, removeMultipleTasks, taskMatchesFilterStatus, taskMatchesSearchQuery } from '../store'
 import { DEFAULT_PARAMS, type TaskRecord } from '../types'
 import { getActiveAgentRounds } from '../lib/agentConversationState'
-import { getActiveApiProfile, getAgentImageApiProfile, normalizeSettings } from '../lib/apiProfiles'
+import { getActiveApiProfile, getAgentImageApiProfile, normalizeSettings, validateApiProfile } from '../lib/apiProfiles'
+import { getAgentProfileValidationError } from '../store'
+import { combinePresetPrompt, getPromptPresetSnapshot, getPromptPresetState, loadPromptPresets, subscribePromptPresets } from '../lib/promptPresets'
+import PromptPresetPicker from './PromptPresetPicker'
+import AgentProgressLabel from './AgentProgressLabel'
+import { useAgentProgress } from '../lib/agentProgress'
+import { taskDeletionMessage, taskDeletionSignature } from '../lib/taskDeletionPreview'
 import { getImageGenerationModel, isGptImage25Model } from '../lib/imageModels'
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
@@ -191,12 +197,20 @@ export default function InputBar() {
   }, [openFavoritePicker, selectedTaskIds])
 
   const handleDeleteSelected = useCallback(() => {
+    const selected = useStore.getState().tasks.filter((task) => selectedTaskIds.includes(task.id))
     setConfirmDialog({
       title: '批量删除',
-      message: `确定要删除选中的 ${selectedTaskIds.length} 个任务吗？`,
-      action: () => {
-        removeMultipleTasks(selectedTaskIds)
+      message: taskDeletionMessage(selected),
+      action: async () => {
+        const latest = useStore.getState().tasks.filter((task) => selectedTaskIds.includes(task.id))
+        if (latest.some((task) => task.status === 'running' || task.falRecoverable || task.customRecoverable)) throw new Error('请先停止选中任务的生成，再删除')
+        if (taskDeletionSignature(latest) !== taskDeletionSignature(selected)) {
+          handleDeleteSelected()
+          return false
+        }
+        await removeMultipleTasks(selectedTaskIds)
       },
+      awaitAction: true,
     })
   }, [selectedTaskIds, setConfirmDialog])
 
@@ -272,25 +286,28 @@ export default function InputBar() {
 
   const handleDeleteSelectedFavoriteCollections = useCallback(() => {
     const selectedIdSet = new Set(selectedFavoriteCollectionIds)
-    const selectedCollections = favoriteCollections.filter((collection) => selectedIdSet.has(collection.id))
+    const current = useStore.getState()
+    const selectedCollections = current.favoriteCollections.filter((collection) => selectedIdSet.has(collection.id))
     if (selectedCollections.length === 0) {
       showToast('没有可删除的收藏夹', 'info')
       return
     }
-    if (favoriteCollections.length - selectedCollections.length < 1) {
+    if (current.favoriteCollections.length - selectedCollections.length < 1) {
       showToast('至少保留一个收藏夹', 'error')
       return
     }
 
     const selectedCollectionIds = new Set(selectedCollections.map((collection) => collection.id))
+    const relatedTasks = current.tasks.filter((task) => getTaskFavoriteCollectionIds(task, current.defaultFavoriteCollectionId).some((id) => selectedCollectionIds.has(id)))
     const imageCount = new Set(
-      tasks
+      current.tasks
         .filter((task) => getTaskFavoriteCollectionIds(task, defaultFavoriteCollectionId).some((id) => selectedCollectionIds.has(id)))
         .flatMap((task) => task.outputImages || []),
     ).size
     setConfirmDialog({
       title: '批量删除收藏夹',
-      message: `确定要删除选中的 ${selectedCollections.length} 个收藏夹吗？`,
+      message: `将删除当前浏览器的 ${selectedCollections.length} 个收藏夹。默认保留任务和原图；勾选后会永久删除关联任务及无其他引用的图片。`,
+      awaitAction: true,
       checkbox: imageCount > 0
         ? {
             label: `同时删除收藏夹中的图片（${imageCount} 张）`,
@@ -298,6 +315,13 @@ export default function InputBar() {
           }
         : undefined,
       action: async (deleteImages = false) => {
+        const latest = useStore.getState()
+        const latestRelated = latest.tasks.filter((task) => getTaskFavoriteCollectionIds(task, latest.defaultFavoriteCollectionId).some((id) => selectedCollectionIds.has(id)))
+        if (taskDeletionSignature(latestRelated) !== taskDeletionSignature(relatedTasks) || latest.favoriteCollections !== current.favoriteCollections) {
+          handleDeleteSelectedFavoriteCollections()
+          return false
+        }
+        if (deleteImages && latestRelated.some((task) => task.status === 'running' || task.falRecoverable || task.customRecoverable)) throw new Error('请先停止关联任务生成，再删除')
         for (const collection of selectedCollections) {
           await deleteFavoriteCollection(collection.id, deleteImages)
         }
@@ -349,11 +373,19 @@ export default function InputBar() {
   const imageHintReleaseRef = useRef<(() => void) | null>(null)
   const [cursorPos, setCursorPos] = useState(0)
   const [menuLeft, setMenuLeft] = useState(0)
+  const [keyboardViewport, setKeyboardViewport] = useState<{ bottom: number; height: number } | null>(null)
   const showPromptExpand = promptExpanded || promptCanExpand
 
   const updateInputBarClearance = useCallback(() => {
     const bar = cardRef.current?.closest<HTMLElement>('[data-input-bar]')
     if (!bar) return
+
+    const viewport = window.visualViewport
+    const keyboardBottom = viewport && window.innerWidth < 640 && viewport.scale === 1 ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0
+    setKeyboardViewport((current) => {
+      const next = keyboardBottom > 100 && viewport ? { bottom: keyboardBottom + 8, height: Math.max(120, viewport.height - 16) } : null
+      return current?.bottom === next?.bottom && current?.height === next?.height ? current : next
+    })
 
     const rect = bar.getBoundingClientRect()
     const clearance = Math.max(0, window.innerHeight - rect.top)
@@ -425,14 +457,26 @@ export default function InputBar() {
   const activeAgentConversation = appMode === 'agent'
     ? agentConversations.find((conversation) => conversation.id === activeAgentConversationId) ?? null
     : null
-  const activeAgentIsRunning = Boolean(activeAgentConversation?.rounds.some((round) => round.status === 'running'))
+  const agentProgress = useAgentProgress(activeAgentConversationId ?? '')
+  const activeAgentIsRunning = Boolean(agentProgress || activeAgentConversation?.rounds.some((round) => round.status === 'running'))
+  const galleryPresetId = useStore((s) => s.galleryPromptPresetId)
+  const presetState = useSyncExternalStore(subscribePromptPresets, getPromptPresetState)
+  const selectedPresetId = appMode === 'agent' ? activeAgentConversation?.promptPresetId : galleryPresetId
+  const selectedPreset = presetState.presets.find((item) => item.id === selectedPresetId)
+  const combinedPrompt = combinePresetPrompt(selectedPreset?.content ?? '', prompt)
+  const finalPromptEdit = useStore((s) => s.galleryFinalPromptEdit)
+  const setFinalPromptEdit = (edit: { text: string; source: string } | null) => useStore.setState({ galleryFinalPromptEdit: edit })
+  const submittingRef = useRef(new Set<string>())
+  const [pendingSubmissions, setPendingSubmissions] = useState<string[]>([])
+  const submissionKey = appMode === 'agent' ? `agent:${activeAgentConversationId}` : JSON.stringify([prompt, galleryPresetId, finalPromptEdit, params, inputImages.map((image) => image.id), maskDraft, activeProfile.id])
+  const submitting = pendingSubmissions.includes(submissionKey)
   const effectiveSettings = useMemo(() => (
     activeProfile.id === settingsActiveProfile.id
       ? settings
       : normalizeSettings({ ...settings, activeProfileId: activeProfile.id })
   ), [activeProfile.id, settingsActiveProfile.id, settings])
-  const hasSubmitApiConfig = Boolean(activeProfile.apiKey)
-  const canSubmit = Boolean(prompt.trim() && hasSubmitApiConfig && !activeAgentIsRunning)
+  const hasSubmitApiConfig = appMode === 'agent' ? !getAgentProfileValidationError(settings) : !validateApiProfile(activeProfile)
+  const canSubmit = Boolean((prompt.trim() || selectedPreset || (appMode === 'gallery' && finalPromptEdit?.text.trim())) && hasSubmitApiConfig && !activeAgentIsRunning && !submitting)
   const submitButtonAriaLabel = activeAgentIsRunning
     ? '停止生成'
     : hasSubmitApiConfig
@@ -440,13 +484,47 @@ export default function InputBar() {
     : '请先配置 API'
   const submitTooltipText = activeAgentIsRunning ? '停止生成' : '尚未完成 API 配置，请在右上角设置中进行'
   const promptPlaceholder = '描述你想生成的图片，可输入 @ 来指定参考图...'
-  const submitCurrentMode = useCallback(() => {
-    if (appMode === 'agent') {
-      void submitAgentMessage()
-    } else {
-      void submitTask()
+  const submitCurrentMode = async () => {
+    if (submittingRef.current.has(submissionKey)) return
+    submittingRef.current.add(submissionKey)
+    setPendingSubmissions([...submittingRef.current])
+    const submitted = useStore.getState()
+    const inputSnapshot = {
+      appMode: submitted.appMode,
+      prompt: submitted.prompt,
+      inputImages: submitted.inputImages,
+      maskDraft: submitted.maskDraft,
+      params: submitted.params,
+      reusedTaskApiProfileId: submitted.reusedTaskApiProfileId,
+      reusedTaskApiProfileName: submitted.reusedTaskApiProfileName,
+      reusedTaskApiProfileMissing: submitted.reusedTaskApiProfileMissing,
     }
-  }, [appMode])
+    try {
+      if (appMode === 'agent') { await submitAgentMessage(); return }
+      if (galleryPresetId) await loadPromptPresets({ force: true })
+      const snapshot = getPromptPresetSnapshot(galleryPresetId)
+      if (galleryPresetId && !snapshot) throw new Error('所选预设已删除，请重新选择后发送')
+      const composed = combinePresetPrompt(snapshot?.content ?? '', prompt)
+      const send = async (text: string, edited: boolean) => {
+        const taskId = await submitTask({ finalPrompt: text, promptPreset: snapshot, promptManuallyEdited: edited, inputSnapshot })
+        if (taskId && useStore.getState().galleryFinalPromptEdit === finalPromptEdit) setFinalPromptEdit(null)
+        return Boolean(taskId)
+      }
+      if (finalPromptEdit && finalPromptEdit.source !== composed) {
+        setConfirmDialog({ title: '最终提示词已手动编辑', message: '输入或预设已变化，请选择本次实际发送的内容。', cancelText: '继续编辑', buttons: [
+          { label: '重新组合', action: () => send(composed, false) },
+          { label: '使用手改内容', tone: 'primary', action: () => send(finalPromptEdit.text, true) },
+        ] })
+        return
+      }
+      if (!finalPromptEdit && combinedPrompt !== composed) {
+        setConfirmDialog({ title: '预设已更新', message: `本次将使用以下最终提示词：\n\n${composed}`, confirmText: '确认发送', awaitAction: true, action: () => send(composed, false) })
+        return
+      }
+      await send(finalPromptEdit?.text ?? composed, Boolean(finalPromptEdit))
+    } catch (error) { useStore.getState().showToast(error instanceof Error ? error.message : '提交失败', 'error') }
+    finally { submittingRef.current.delete(submissionKey); setPendingSubmissions([...submittingRef.current]) }
+  }
   const stopActiveAgentResponse = useCallback(() => {
     stopAgentResponse(activeAgentConversationId)
   }, [activeAgentConversationId])
@@ -1518,6 +1596,8 @@ export default function InputBar() {
 
   const renderParams = (cols: string) => (
     <InputParamsPanel
+      compact={isMobile}
+      appMode={appMode}
       cols={cols}
       params={params}
       setParams={setParams}
@@ -1580,7 +1660,7 @@ export default function InputBar() {
       <div
         data-input-bar
         className={`fixed bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 z-30 w-full max-w-4xl px-3 sm:px-4 transition-all duration-300${promptExpanded ? ' flex flex-col' : ''}`}
-        style={promptExpanded ? { top: `${promptExpandedTop}px`, transitionProperty: 'none' } : undefined}
+        style={{ ...(promptExpanded ? { top: `${promptExpandedTop}px`, transitionProperty: 'none' } : {}), ...(keyboardViewport ? { top: 'auto', bottom: keyboardViewport.bottom, maxHeight: keyboardViewport.height, overflowY: 'auto', transitionProperty: 'none' } : {}) }}
       >
         <InputBatchBars
           showFavoriteCollectionBatchBar={showFavoriteCollectionBatchBar}
@@ -1600,6 +1680,12 @@ export default function InputBar() {
           onDeleteSelected={handleDeleteSelected}
         />
         <div ref={cardRef} className={`bg-white/70 dark:bg-gray-900/70 backdrop-blur-2xl border border-white/50 dark:border-white/[0.08] shadow-[0_8px_30px_rgb(0,0,0,0.08)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.3)] rounded-2xl sm:rounded-3xl p-3 sm:p-4 ring-1 ring-black/5 dark:ring-white/10${promptExpanded ? ' flex min-h-0 flex-1 flex-col' : ''}`}>
+          <PromptPresetPicker />
+          {appMode === 'gallery' && (selectedPreset || finalPromptEdit) && <details className="mb-2 text-xs">
+            <summary className="min-h-11 flex items-center cursor-pointer">最终提示词{finalPromptEdit ? '（已手动编辑）' : ''}</summary>
+            <textarea aria-label="最终提示词" className="w-full h-28 p-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 resize-y" value={finalPromptEdit?.text ?? combinedPrompt} onChange={(event) => setFinalPromptEdit({ text: event.target.value, source: finalPromptEdit?.source ?? combinedPrompt })} />
+          </details>}
+          {appMode === 'agent' && (activeAgentIsRunning || submitting) && <div className="mb-2 text-xs"><AgentProgressLabel conversationId={activeAgentConversationId ?? ''} /></div>}
           {/* 移动端拖动条 */}
           <div
             ref={handleRef}
@@ -1804,7 +1890,7 @@ export default function InputBar() {
                 >
                   <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig) && submitHover} text={submitTooltipText} />
                   <button
-                    onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
+                    onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true, appMode === 'agent' ? 'agent' : 'api')}
                     disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}
                     className={`p-2.5 rounded-xl transition-all shadow-sm hover:shadow ${
                       activeAgentIsRunning
@@ -1815,7 +1901,7 @@ export default function InputBar() {
                     }`}
                     aria-label={submitButtonAriaLabel}
                   >
-                    {activeAgentIsRunning ? (
+                    {!hasSubmitApiConfig ? <span className="whitespace-nowrap">配置 API</span> : activeAgentIsRunning ? (
                       <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
                         <rect x="7" y="7" width="10" height="10" rx="1.5" />
                       </svg>
@@ -1911,7 +1997,7 @@ export default function InputBar() {
                 >
                   <ButtonTooltip visible={(activeAgentIsRunning || !hasSubmitApiConfig) && submitHover} text={submitTooltipText} />
                   <button
-                    onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true)}
+                    onClick={() => activeAgentIsRunning ? stopActiveAgentResponse() : hasSubmitApiConfig ? submitCurrentMode() : setShowSettings(true, appMode === 'agent' ? 'agent' : 'api')}
                     disabled={activeAgentIsRunning ? false : hasSubmitApiConfig ? !canSubmit : false}
                     aria-label={submitButtonAriaLabel}
                     className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all shadow-sm ${
@@ -1922,7 +2008,7 @@ export default function InputBar() {
                         : 'bg-blue-500 text-white hover:bg-blue-600 disabled:bg-gray-300 dark:disabled:bg-white/[0.04] disabled:opacity-50 disabled:cursor-not-allowed'
                     }`}
                   >
-                    {activeAgentIsRunning ? (
+                    {!hasSubmitApiConfig ? <span className="whitespace-nowrap">配置 API</span> : activeAgentIsRunning ? (
                       <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
                         <rect x="7" y="7" width="10" height="10" rx="1.5" />
                       </svg>
@@ -1931,7 +2017,7 @@ export default function InputBar() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                       </svg>
                     )}
-                    {activeAgentIsRunning ? '停止生成' : maskDraft ? '遮罩编辑' : '生成图像'}
+                    {hasSubmitApiConfig && (activeAgentIsRunning ? '停止生成' : maskDraft ? '遮罩编辑' : '生成图像')}
                   </button>
                 </div>
               </div>

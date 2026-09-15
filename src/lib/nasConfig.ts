@@ -1,4 +1,4 @@
-import type { AppSettings } from '../types'
+﻿import type { AppSettings } from '../types'
 import { DEFAULT_SETTINGS, normalizeSettings } from './apiProfiles'
 import { nasFetch } from './nasAuth'
 
@@ -13,6 +13,8 @@ let status = ''
 let loadedSnapshot = ''
 let queuedWrites = 0
 let legacySettings: Partial<AppSettings> | null = null
+
+type SaveNasSettingsOptions = { blockUsageOnFailure?: boolean }
 
 export function captureLegacySettings(value: unknown) {
   if (legacySettings || !value || typeof value !== 'object') return
@@ -83,13 +85,15 @@ export async function loadNasSettings(settings: AppSettings): Promise<AppSetting
   return loaded
 }
 
-export function saveNasSettings(settings: AppSettings) {
+export function saveNasSettings(settings: AppSettings, options: SaveNasSettingsOptions = {}) {
   const snapshot = nasSettingsSnapshot(settings)
   if (!queuedWrites && !failure && JSON.stringify(snapshot) === loadedSnapshot) return pending
   const current = generation
+  const blockUsageOnFailure = options.blockUsageOnFailure !== false
+  let saveFailed = false
   queuedWrites++
   setStatus('正在保存到 NAS…')
-  pending = pending.catch(() => {}).then(async () => {
+  const write = pending.catch(() => {}).then(async () => {
     if (current !== generation) throw new Error('登录状态已变化，请重新读取配置')
     const config = { ...source, ...snapshot }
     // 旧单配置字段也由 NAS 当前 profile 统一覆盖，避免旧 Key 留在文件中。
@@ -97,22 +101,27 @@ export function saveNasSettings(settings: AppSettings) {
       if (key in config) config[key] = settings[key]
     }
     const response = await nasFetch('/api/api-config', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-Match': revision }, body: JSON.stringify({ config }) })
-    if (!response.ok) throw new Error(response.status === 409 || response.status === 412 ? 'NAS 配置已被其他页面修改，请重新读取后再保存' : 'NAS 配置保存失败，请检查连接后重试')
+    if (!response.ok) throw new Error(response.status === 409 || response.status === 412 ? 'NAS 配置已被其他页面修改，请重新读取后再保存' : response.status === 401 ? '应用登录已过期，请重新登录后继续保存' : 'NAS 配置保存失败，请检查连接后重试')
     const payload = await response.json()
-    if (current !== generation) return
+    if (current !== generation) throw new Error('登录状态已变化，请重新读取配置')
     source = payload.config
     revision = payload.revision
     loadedSnapshot = JSON.stringify(snapshot)
     failure = null
-  }).catch((error: Error) => {
-    if (current === generation) { failure = error; setStatus(error.message) }
+  })
+  pending = write.catch((error: Error) => {
+    if (current === generation) {
+      saveFailed = true
+      if (blockUsageOnFailure) failure = error
+      setStatus(error.message)
+    }
     throw error
   }).finally(() => {
     if (current !== generation) return
     queuedWrites--
-    if (!failure) setStatus(queuedWrites ? '正在保存到 NAS…' : '已保存到 NAS')
-  })
-  return pending
+    if (!failure && !saveFailed) setStatus(queuedWrites ? '正在保存到 NAS…' : '已保存到 NAS')
+  }).catch(() => {})
+  return write
 }
 
 export async function waitForNasConfig() {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SETTINGS, normalizeSettings } from './apiProfiles'
-import { captureLegacySettings, clearLegacyNasSettings, clearNasConfig, loadNasSettings, localOnlySettings, mergeLegacyNasSettings, persistedNasSettings, saveNasSettings, waitForNasConfig } from './nasConfig'
+import { captureLegacySettings, clearLegacyNasSettings, clearNasConfig, getNasConfigStatus, loadNasSettings, localOnlySettings, mergeLegacyNasSettings, persistedNasSettings, saveNasSettings, waitForNasConfig } from './nasConfig'
 
 beforeEach(clearNasConfig)
 afterEach(() => { clearNasConfig(); clearLegacyNasSettings(); vi.unstubAllGlobals() })
@@ -39,6 +39,21 @@ describe('NAS authoritative API configuration', () => {
     expect(fetcher.mock.calls[2][1].headers.get('If-Match')).toBe('r2')
     expect(JSON.parse(fetcher.mock.calls[2][1].body).config.extension).toEqual({ enabled: true })
   })
+  it('keeps old runtime config usable when a draft save fails without blocking usage', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 401 })))
+    await expect(saveNasSettings(DEFAULT_SETTINGS, { blockUsageOnFailure: false })).rejects.toThrow('重新登录')
+    await expect(waitForNasConfig()).resolves.toBeUndefined()
+  })
+
+  it('rejects a save when login generation changes before the response returns', async () => {
+    let resolveFetch: (response: Response) => void = () => {}
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve })))
+    const save = saveNasSettings(DEFAULT_SETTINGS, { blockUsageOnFailure: false })
+    clearNasConfig()
+    resolveFetch(Response.json({ config: {}, revision: 'r2' }))
+    await expect(save).rejects.toThrow('登录状态已变化')
+  })
+
   it('blocks generation after save conflict until a successful reload', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 409 })))
     await expect(saveNasSettings(DEFAULT_SETTINGS)).rejects.toThrow('其他页面')

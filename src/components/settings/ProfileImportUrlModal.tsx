@@ -1,5 +1,7 @@
+import { useRef } from 'react'
 import { createPortal } from 'react-dom'
 import type { ApiProfile } from '../../types'
+import { useDialogFocus } from '../../hooks/useDialogFocus'
 import { Checkbox } from '../Checkbox'
 import { CloseIcon, CopyIcon } from '../icons'
 
@@ -24,6 +26,9 @@ export default function ProfileImportUrlModal({
   onCopy,
   onClose,
 }: ProfileImportUrlModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+  useDialogFocus(true, dialogRef)
+
   return createPortal(
     <div
       data-no-drag-select
@@ -32,19 +37,25 @@ export default function ProfileImportUrlModal({
     >
       <div className="absolute inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-md animate-overlay-in" />
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="profile-import-url-title"
+        tabIndex={-1}
         className="relative bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] rounded-3xl shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] max-w-sm w-full p-6 z-10 ring-1 ring-black/5 dark:ring-white/10 animate-confirm-in"
         onClick={(e) => e.stopPropagation()}
       >
         <button
           type="button"
           onClick={onClose}
+          data-autofocus
           className="absolute right-4 top-4 shrink-0 rounded-full p-1.5 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
           aria-label="关闭"
         >
           <CloseIcon className="h-5 w-5" />
         </button>
 
-        <h3 className="mb-3 pr-8 flex items-start gap-2.5 text-base font-bold text-gray-800 dark:text-gray-100 leading-snug">
+        <h3 id="profile-import-url-title" className="mb-3 pr-8 flex items-start gap-2.5 text-base font-bold text-gray-800 dark:text-gray-100 leading-snug">
           <CopyIcon className="h-5 w-5 shrink-0 text-blue-500 mt-0.5" />
           <span>复制导入配置「{profile.name}」的 URL</span>
         </h3>

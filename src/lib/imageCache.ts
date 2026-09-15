@@ -18,6 +18,7 @@ const thumbnailBackfillIds = new Map<string, 'visible' | 'background'>()
 const thumbnailBackfillRunningIds = new Set<string>()
 const thumbnailSubscribers = new Map<string, Set<(thumbnail: ImageThumbnail) => void>>()
 let thumbnailBackfillScheduled = false
+let thumbnailCacheGeneration = 0
 
 const MAX_IMAGE_CACHE_ENTRIES = 8
 const MAX_THUMBNAIL_CACHE_ENTRIES = 80
@@ -80,6 +81,13 @@ export function clearImageCaches() {
   imageCache.clear()
   thumbnailCache.clear()
   thumbnailBackfillIds.clear()
+  thumbnailCacheGeneration += 1
+}
+
+export function clearRebuildableImageCaches() {
+  thumbnailCache.clear()
+  thumbnailBackfillIds.clear()
+  thumbnailCacheGeneration += 1
 }
 
 export async function ensureImageCached(id: string): Promise<string | undefined> {
@@ -198,12 +206,14 @@ function getThumbnailConcurrencyForBatch(sizes: Array<{ width?: number; height?:
 
 async function startThumbnailBackfill(id: string) {
   thumbnailBackfillRunningIds.add(id)
+  const startedGeneration = thumbnailCacheGeneration
 
   try {
     if (getCachedThumbnail(id)) return
 
     const thumbnail = await getImageThumbnail(id)
     if (thumbnail?.thumbnailDataUrl) {
+      if (startedGeneration !== thumbnailCacheGeneration) return
       cacheThumbnail(id, {
         dataUrl: thumbnail.thumbnailDataUrl,
         width: thumbnail.width,

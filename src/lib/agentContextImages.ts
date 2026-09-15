@@ -1,11 +1,24 @@
 import { loadImage } from './canvasImage'
-import { getAgentContextImage, putAgentContextImageIfSourceMatches } from './db'
+import { getAgentContextImage, getRebuildableCacheEpoch, putAgentContextImageIfSourceMatches } from './db'
 import { throwIfAborted } from './serverSentEvents'
 
 const MAX_CONTEXT_IMAGE_LENGTH = 512 * 1024
 const MAX_CONTEXT_IMAGE_EDGE = 1536
 // 调整压缩参数时递增，旧副本会在下次使用时被替换。
 const CONTEXT_IMAGE_VERSION = 1
+
+export interface AgentContextImageProgress {
+  checked: number
+  total?: number
+  processed: number
+  cacheHits: number
+  currentImageId?: string
+}
+
+export interface AgentContextImageLoaderOptions {
+  total?: number
+  onProgress?: (progress: AgentContextImageProgress) => void
+}
 
 export async function compressAgentContextImage(dataUrl: string): Promise<string> {
   if (dataUrl.length <= MAX_CONTEXT_IMAGE_LENGTH) return dataUrl
@@ -33,34 +46,69 @@ export async function compressAgentContextImage(dataUrl: string): Promise<string
 export function createAgentContextImageLoader(
   load: (id: string) => Promise<string | null | undefined>,
   signal?: AbortSignal,
+  options: AgentContextImageLoaderOptions = {},
 ) {
   // 内存只合并正在处理的请求；已完成的副本从 IndexedDB 读取，避免删除后仍命中内存。
   const cache = new Map<string, Promise<string | null | undefined>>()
+  const reportedIds = new Set<string>()
+  const processedIds = new Set<string>()
+  const progress = {
+    checked: 0,
+    processed: 0,
+    cacheHits: 0,
+  }
+  const emitProgress = (id: string) => {
+    options.onProgress?.({
+      checked: progress.checked,
+      total: options.total,
+      processed: progress.processed,
+      cacheHits: progress.cacheHits,
+      currentImageId: id,
+    })
+  }
   return async (id: string) => {
     throwIfAborted(signal)
     if (!cache.has(id)) {
       cache.set(id, (async () => {
+        let counted = false
+        const markChecked = (cacheHit: boolean) => {
+          if (counted) return
+          counted = true
+          if (reportedIds.has(id)) return
+          reportedIds.add(id)
+          progress.checked += 1
+          if (cacheHit) progress.cacheHits += 1
+          emitProgress(id)
+        }
         try {
           const stored = await getAgentContextImage(id)
           throwIfAborted(signal)
           if (stored?.version === CONTEXT_IMAGE_VERSION && typeof stored.dataUrl === 'string'
             && stored.dataUrl.startsWith('data:image/') && stored.dataUrl.length <= MAX_CONTEXT_IMAGE_LENGTH) {
+            markChecked(true)
             return stored.dataUrl
           }
         } catch (error) {
           throwIfAborted(signal)
           console.warn('读取 Agent 图片缓存失败，将重新压缩', error)
         }
+        markChecked(false)
+        const epoch = await getRebuildableCacheEpoch()
         const dataUrl = await load(id)
         throwIfAborted(signal)
         if (!dataUrl) return dataUrl
         const compressed = await compressAgentContextImage(dataUrl)
         throwIfAborted(signal)
+        if (reportedIds.has(id) && !processedIds.has(id)) {
+          processedIds.add(id)
+          progress.processed += 1
+          emitProgress(id)
+        }
         try {
-          const saved = await putAgentContextImageIfSourceMatches({ id, dataUrl: compressed, version: CONTEXT_IMAGE_VERSION }, dataUrl)
+          const saved = await putAgentContextImageIfSourceMatches({ id, dataUrl: compressed, version: CONTEXT_IMAGE_VERSION }, dataUrl, epoch)
           if (!saved) return undefined
         } catch (error) {
-          // 缓存空间不足不阻止本次发送，下次发送仍可重试缓存。
+          // 缓存空间不足不阻止本次发送，下一次发送仍可重试缓存。
           console.warn('保存 Agent 图片缓存失败，本次使用已压缩图片', error)
         }
         return compressed

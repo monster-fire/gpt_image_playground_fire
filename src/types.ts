@@ -174,6 +174,8 @@ export interface AgentInputDraft {
 export type TaskStatus = 'running' | 'done' | 'error'
 
 export interface TaskRecord {
+  promptPreset?: { id: string; name: string; revision: string; content: string } | null
+  promptManuallyEdited?: boolean
   id: string
   prompt: string
   params: TaskParams
@@ -276,6 +278,7 @@ export interface AgentMessage {
 }
 
 export interface AgentRound {
+  promptPreset?: { id: string; name: string; revision: string; content: string } | null
   id: string
   index: number
   parentRoundId?: string | null
@@ -295,6 +298,7 @@ export interface AgentRound {
 }
 
 export interface AgentConversation {
+  promptPresetId?: string | null
   id: string
   title: string
   activeRoundId?: string | null
@@ -461,6 +465,7 @@ export interface ExportData {
     total: number
   }
   settings?: AppSettings
+  preferences?: Partial<AppSettings>
   tasks?: TaskRecord[]
   favoriteCollections?: FavoriteCollection[]
   defaultFavoriteCollectionId?: string | null

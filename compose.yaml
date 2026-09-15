@@ -15,6 +15,8 @@ services:
       API_CONFIG_PATH: /config/gpt-image-playground.json
       DATA_DIR: /data
     volumes:
+      # NAS Docker 面板中可把这两个宿主路径替换为 NAS 共享目录。
+      # API 配置写入 /config/gpt-image-playground.json；会话等服务端状态写入 /data。
       - ./config:/config
       - ./data:/data
     restart: unless-stopped

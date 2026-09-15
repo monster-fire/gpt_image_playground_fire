@@ -1,6 +1,8 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
 import { useStore, reuseConfig, editOutputs, removeTask, showCodexCliPrompt, getCodexCliPromptKey, retryTask } from '../store'
+import { taskDeletionMessage, taskDeletionSignature } from '../lib/taskDeletionPreview'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { useTooltip } from '../hooks/useTooltip'
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
@@ -100,7 +102,13 @@ export default function DetailModal() {
     if (count > 0 && imageIndex >= count) setImageIndex(count - 1)
   }, [imageIndex, streamPreviewItems.length, task, task?.status])
 
-  useCloseOnEscape(Boolean(task), () => setDetailTaskId(null))
+  const hasNestedModal = showRawUrlsModal || showRawResponseModal
+  useCloseOnEscape(Boolean(task) && !hasNestedModal, () => setDetailTaskId(null))
+  useCloseOnEscape(showRawUrlsModal, () => setShowRawUrlsModal(false))
+  useCloseOnEscape(showRawResponseModal, () => setShowRawResponseModal(false))
+  useDialogFocus(Boolean(task) && !hasNestedModal, modalRef)
+  useDialogFocus(showRawUrlsModal, rawUrlsModalRef)
+  useDialogFocus(showRawResponseModal, rawResponseModalRef)
   usePreventBackgroundScroll(Boolean(task), [modalRef, rawUrlsModalRef, rawResponseModalRef])
 
   // Reset index when task changes
@@ -307,12 +315,36 @@ export default function DetailModal() {
     setDetailTaskId(null)
   }
 
-  const handleDelete = () => {
-    setDetailTaskId(null)
+  const handleDelete = (target = task) => {
     setConfirmDialog({
       title: '删除任务',
-      message: '确定要删除这个任务吗？关联的图片资源也会被清理（如果没有其他任务引用）。',
-      action: () => removeTask(task),
+      message: taskDeletionMessage([target]),
+      awaitAction: true,
+      action: async () => {
+        const latest = useStore.getState().tasks.find((item) => item.id === task.id)
+        if (!latest) {
+          setDetailTaskId(null)
+          showToast('任务已不存在', 'info')
+          return true
+        }
+        if (latest.status === 'running' || latest.falRecoverable || latest.customRecoverable) {
+          showToast('任务仍在生成或恢复中，请先停止后再删除', 'info')
+          return true
+        }
+        if (taskDeletionSignature([latest]) !== taskDeletionSignature([target])) {
+          handleDelete(latest)
+          return false
+        }
+        try {
+          await removeTask(latest)
+          setDetailTaskId(null)
+          return true
+        } catch (err) {
+          console.error(err)
+          showToast('删除任务失败', 'error')
+          return false
+        }
+      },
     })
   }
 
@@ -452,12 +484,17 @@ export default function DetailModal() {
       <div className="absolute inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-md animate-overlay-in" />
       <div
         ref={modalRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="任务详情"
+        tabIndex={-1}
         className="relative bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] rounded-3xl shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col md:flex-row z-10 ring-1 ring-black/5 dark:ring-white/10 animate-modal-in"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex h-14 items-center justify-end px-4 md:hidden">
           <button
             onClick={() => setDetailTaskId(null)}
+            data-autofocus
             className="p-1 rounded-full hover:bg-gray-100 dark:hover:bg-white/[0.06] transition text-gray-400"
             aria-label="关闭"
           >
@@ -1062,7 +1099,7 @@ export default function DetailModal() {
               编辑输出
             </button>
             <button
-              onClick={handleDelete}
+              onClick={() => handleDelete()}
               className="col-span-3 sm:flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 transition text-sm font-medium whitespace-nowrap"
             >
               <TrashIcon className="w-4 h-4 flex-shrink-0" />
@@ -1097,9 +1134,9 @@ export default function DetailModal() {
             rawUrlsBackdropPointerDownRef.current = false
           }}
         >
-          <div ref={rawUrlsModalRef} className="flex w-full max-w-2xl max-h-[90vh] flex-col overflow-hidden rounded-2xl bg-white shadow-xl dark:bg-[#1c1c1e]" onClick={(e) => e.stopPropagation()}>
+          <div ref={rawUrlsModalRef} role="dialog" aria-modal="true" aria-labelledby="raw-urls-title" tabIndex={-1} className="flex w-full max-w-2xl max-h-[90vh] flex-col overflow-hidden rounded-2xl bg-white shadow-xl dark:bg-[#1c1c1e]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4 dark:border-white/[0.08] shrink-0">
-              <h3 className="text-base font-semibold text-gray-900 dark:text-white">原始图片链接 ({rawImageUrls.length})</h3>
+              <h3 id="raw-urls-title" className="text-base font-semibold text-gray-900 dark:text-white">原始图片链接 ({rawImageUrls.length})</h3>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -1119,6 +1156,7 @@ export default function DetailModal() {
                 <button
                   type="button"
                   onClick={() => setShowRawUrlsModal(false)}
+                  data-autofocus
                   className="rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-500 dark:hover:bg-white/[0.08] dark:hover:text-gray-300 transition-colors"
                 >
                   <CloseIcon className="w-5 h-5" />
@@ -1175,6 +1213,10 @@ export default function DetailModal() {
         >
           <div
             ref={rawResponseModalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="raw-response-title"
+            tabIndex={-1}
             className="flex w-full max-w-3xl max-h-[90vh] flex-col overflow-hidden rounded-2xl bg-white shadow-xl dark:bg-[#1c1c1e]"
             onPointerDown={(e) => {
               if (!(e.target as Element).closest('[data-selectable-text]')) clearTextSelection()
@@ -1182,7 +1224,7 @@ export default function DetailModal() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4 dark:border-white/[0.08] shrink-0">
-              <h3 className="text-base font-semibold text-gray-900 dark:text-white">原始响应数据</h3>
+              <h3 id="raw-response-title" className="text-base font-semibold text-gray-900 dark:text-white">原始响应数据</h3>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -1202,6 +1244,7 @@ export default function DetailModal() {
                 <button
                   type="button"
                   onClick={() => setShowRawResponseModal(false)}
+                  data-autofocus
                   className="rounded-full p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-500 dark:hover:bg-white/[0.08] dark:hover:text-gray-300 transition-colors"
                 >
                   <CloseIcon className="w-5 h-5" />

@@ -11,6 +11,8 @@
 
 2026-09-15 P0 更新：`NasAuthGate` 在加载工作区前验证会话和配置；`nasAuth.ts` 区分 NAS Cookie 与供应商 Key，`nasConfig.ts` 管理 NAS 读写及版本冲突。`server/app.mjs` 使用 Node 内置模块，Docker 同时运行 Node 与 Nginx。重试采用原任务当前有效配置并确认范围，错误诊断分类脱敏，灯箱立即显示加载/缺失/失败状态，NAS 刷新不自动恢复生成。测试与部署参数见 [产品体验文档](product-experience-improvement-plan.md#6-本次交付边界)。下文保留原始结构梳理，涉及这些模块时以本段及当前源码为准。
 
+2026-09-15 P1 更新：UX-05～12、UX-16、UX-18 已完成。Agent 图片准备进度、移动端参数折叠、本地存储统计与跨标签清理协调、删除影响预览、长对话图片懒加载、API 配置草稿与检查、备份预览和分批导入、弹窗焦点、筛选空状态及服务器提示词预设均已接入。API 配置与提示词预设保存在服务器；任务、对话、普通原图、收藏关系和派生缓存仍保存在浏览器。完整入口和验证命令见 [产品体验文档](product-experience-improvement-plan.md#p1-确认与实施状态2026-09-15)。
+
 ## 1. 快速认识
 
 GPT Image Playground 是浏览器端图片生成、编辑和历史管理应用。仓库没有自有图片生成业务后端；前端调用用户配置的外部 API，Docker 和开发环境可提供转发代理。
@@ -148,10 +150,12 @@ Agent 图片任务通过 `agentConversationId`、`agentRoundId`、`agentMessageI
 - 缩略图独立保存，当前版本 `2`，最长边 `720`，WebP 质量 `0.9`。缓存当前限制原图 `8` 项、缩略图 `80` 项，补全并发 `4`。
 - 任务主要通过图片 ID 引用图片；输入 UI 使用 `InputImage { id, dataUrl }`。持久化草稿时会去掉图片 data URL，恢复时再按 ID 读取。
 - Agent 对话通过 store 订阅写入 IndexedDB；`initStore` 支持将旧 localStorage 对话迁入，并清理旧持久化内容中的大响应数据。
+- `localDataActivity.ts` 使用 BroadcastChannel、清理锁和清理代次协调多标签页写入与全量清理；旧页面在其他页面清理后必须刷新才可继续写入。`localStorageStats.ts` 与 `LocalStoragePanel` 展示逻辑大小、站点配额估算并提供只清理可重建缓存的入口。
 - 删除图片前须检查任务、草稿、对话等引用。相关入口为 `deleteImageIfUnreferenced`、`removeTasks`、`scrubAgentOutputPayloadsForDeletedTasks`；`db.ts` 的 `commitTaskDeletion` 将任务与对话变更放在同一事务。
-- 配置包含 `apiKey`。现有持久化没有加密层；启用配置导出的 ZIP 会包含 settings，后续不要将实际密钥写入知识文档或提交。
+- API 配置包含 `apiKey`，由 NAS 配置接口保存；设置弹窗通过 `settingsDraft.ts` 明确保存，登录失效时只在模块内暂存去密钥的非敏感草稿。选择导出 API 配置的 ZIP 会包含密钥，后续不要将实际密钥写入知识文档或提交。
+- 提示词预设由 `promptPresets.ts` 从服务器读取并只保留内存工作副本；任务和 Agent 轮次保存发送时快照，删除服务器预设不会改写历史。
 
-备份入口在 `store.ts` 的 `exportData` / `importData`，格式处理在 [exportZip.ts](../src/lib/exportZip.ts)。当前 manifest 版本为 `3`，ZIP 中有 `manifest.json`、`images/`、`thumbnails/`，支持分卷及旧格式导入。涉及任务数据的操作需结合 [dataOperations.ts](../src/lib/dataOperations.ts) 检查正在运行或等待恢复的工作。
+备份入口在 `store.ts` 的 `exportData` / `previewDataImport` / `commitDataImport`，界面在 `BackupPanel.tsx`，格式处理在 [exportZip.ts](../src/lib/exportZip.ts)。当前 manifest 版本为 `3`，可选择 API 配置、界面偏好、服务器提示词预设、任务、原图和缩略图；支持预检、冲突复核、分批提交、分卷及旧格式导入。涉及任务数据的操作需结合 [dataOperations.ts](../src/lib/dataOperations.ts) 检查正在运行或等待恢复的工作。
 
 ## 7. 按修改目标找入口
 
@@ -160,11 +164,12 @@ Agent 图片任务通过 `agentConversationId`、`agentRoundId`、`agentMessageI
 | 生图参数、供应商兼容 | `types.ts`、`apiProfiles.ts`、`api.ts`、`openaiCompatibleImageApi.ts`、`falAiImageApi.ts` | `api.test.ts`、`apiProfiles.test.ts`、`falAiImageApi.test.ts`、`paramCompatibility.test.ts`。 |
 | 任务重试、失败、恢复 | `store.ts`、`taskState.ts` | `store.test.ts`、`taskState.test.ts`。 |
 | Agent 上下文、分支、批量图像 | `store.ts`、`agentApi.ts`、`agentInputBuilder.ts`、`agentConversationState.ts`、`agentImageReferences.ts` | `agent*.test.ts` 与 `store.test.ts` 的 Agent 场景。 |
-| 设置面板、配置导入与预置 | `components/SettingsModal.tsx`、`components/settings/`、`apiProfiles.ts`、`presetConfig.ts`、`urlSettings.ts` | 对应 lib 同名测试。 |
+| 设置面板、配置导入与预置 | `components/SettingsModal.tsx`、`components/settings/`、`settingsDraft.ts`、`apiProfiles.ts`、`presetConfig.ts`、`urlSettings.ts` | `SettingsModal.test.tsx`、`ApiConfigCheck.test.tsx` 与对应 lib 同名测试。 |
 | 上传、引用、输入草稿 | `components/InputBar.tsx`、`components/input/`、`inputDraftState.ts`、`promptImageMentions.ts` | `inputDraftState.test.ts`、`promptImageMentions.test.ts`、`contentEditableMentions.test.ts`。 |
 | 画廊、收藏、筛选与批量操作 | `components/TaskGrid.tsx`、`TaskCard.tsx`、`SearchBar.tsx`、`components/favorites/`、`favoriteState.ts` | `favoriteState.test.ts`、`store.test.ts`；交互另做浏览器验证。 |
 | 图片预览与下载 | `components/Lightbox.tsx`、`DetailModal.tsx`、`imageCache.ts`、`downloadImages.ts`、`viewportTransform.ts` | `imageCache.test.ts`、`viewportTransform.test.ts`；下载另做浏览器验证。 |
-| 数据迁移、删除、导入导出 | `db.ts`、`persistedState.ts`、`exportZip.ts`、`store.ts` | `persistedState.test.ts`、`exportZip.test.ts`、`store.test.ts`。 |
+| 数据迁移、删除、导入导出 | `db.ts`、`persistedState.ts`、`localDataActivity.ts`、`localStorageStats.ts`、`backupPreview.ts`、`exportZip.ts`、`store.ts` | 对应 lib 测试、`BackupPanel.test.tsx`、`store.test.ts` 与浏览器清理脚本。 |
+| 提示词预设 | `promptPresets.ts`、`server/promptPresets.mjs`、`PromptPresetManager.tsx`、`PromptPresetPicker.tsx`、`InputBar.tsx` | `promptPresets.test.ts`、组件测试、后端测试与 `test-p1-generation.browser.mjs`。 |
 
 表内未写前缀的业务模块通常位于 `src/lib/`，核心 `store.ts` / `types.ts` 位于 `src/`，测试与被测模块同目录。
 
@@ -182,7 +187,7 @@ npm run mock:api
 ```
 
 - `build` 实际执行 `tsc -b && vite build`，包含 TypeScript 检查。`tsconfig.json` 为严格模式，target 为 ES2020。
-- 当前有 `33` 个 `*.test.ts` 文件。store 测试 mock 了数据库等边界，不能代替真实 IndexedDB、浏览器交互或远端 API 验证。
+- P1 完成时全量验证为 Vitest 60 文件 / 729 项及 Node 后端 16 项通过。store 测试 mock 了数据库等边界，不能代替真实 IndexedDB、浏览器交互或远端 API 验证；P1 另有独立 Chrome 脚本覆盖长对话、模拟生图和跨标签清理。
 - 仓库未定义独立 lint 脚本；不要将未运行的 lint 写成已通过，也不要为文档任务引入工具配置。
 - [本地故障模拟 API](mock-image-api.md) 默认监听 `127.0.0.1:8787`，可复现 CORS、URL 下载失败、异常响应、流式失败、异步轮询等场景。
 - 开发代理读取 `dev-proxy.config.json`，模板为 [dev-proxy.config.example.json](../dev-proxy.config.example.json)；实际配置被 gitignore 忽略。
@@ -211,4 +216,4 @@ npm run mock:api
 
 已核对入口、配置合并、请求分发、数据类型、持久化/恢复、测试布局和部署文件。本文是源码阅读结果，不是完整代码审计或性能评估。
 
-本次只新增项目文档和文档入口，没有修改业务代码。工作区未安装 `node_modules`；未安装依赖、运行构建/测试、启动页面或调用真实生成服务。后续执行代码任务时应建立新的构建、测试与必要的浏览器验证记录，不将本文作为这些检查已通过的证据。
+P0/P1 的业务实现与本地验证记录见对应执行文档；未在用户真实 NAS/ARM 环境或真实付费供应商上验证。后续修改仍需重新运行与改动范围匹配的构建、测试和浏览器验证，不能把本文的历史结果当作新改动已经通过的证据。

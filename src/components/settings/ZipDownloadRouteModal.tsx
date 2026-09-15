@@ -1,6 +1,7 @@
 import type { RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import type { ZipDownloadRoute } from '../../types'
+import { useDialogFocus } from '../../hooks/useDialogFocus'
 import { Checkbox } from '../Checkbox'
 import { CloseIcon } from '../icons'
 
@@ -26,6 +27,8 @@ export default function ZipDownloadRouteModal({
   onSetEnabled,
   onClose,
 }: ZipDownloadRouteModalProps) {
+  useDialogFocus(true, scrollBoundaryRef)
+
   return createPortal(
     <div
       data-no-drag-select
@@ -34,15 +37,21 @@ export default function ZipDownloadRouteModal({
     >
       <div className="absolute inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-md animate-overlay-in" />
       <div
+        ref={scrollBoundaryRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="zip-download-route-title"
+        tabIndex={-1}
         className="relative z-10 w-full max-w-md rounded-3xl bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] ring-1 ring-black/5 dark:ring-white/10 animate-confirm-in flex flex-col max-h-[85vh] sm:max-h-[90vh]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="shrink-0 p-6 pb-2">
           <div className="mb-3 flex items-center justify-between gap-4">
-            <h3 className="text-base font-bold text-gray-800 dark:text-gray-100">使用压缩包进行批量下载</h3>
+            <h3 id="zip-download-route-title" className="text-base font-bold text-gray-800 dark:text-gray-100">使用压缩包进行批量下载</h3>
             <button
               type="button"
               onClick={onClose}
+              data-autofocus
               className="shrink-0 rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200"
               aria-label="关闭"
             >
@@ -55,7 +64,7 @@ export default function ZipDownloadRouteModal({
           </div>
         </div>
 
-        <div ref={scrollBoundaryRef} className="flex-1 overflow-y-auto px-6 space-y-3 custom-scrollbar min-h-0 py-2">
+        <div className="flex-1 overflow-y-auto px-6 space-y-3 custom-scrollbar min-h-0 py-2">
           {ZIP_DOWNLOAD_ROUTE_OPTIONS.map((option) => {
             const isChecked = routes.includes(option.route)
             return (

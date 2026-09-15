@@ -1,21 +1,94 @@
 import type { AgentConversation, TaskRecord, StoredAgentContextImage, StoredImage, StoredImageThumbnail } from '../types'
 import { ApiRequestError, sanitizeApiErrorText } from './requestError'
+import { assertLocalDataAccess } from './localDataActivity'
 
 const DB_NAME = 'gpt-image-playground'
-const DB_VERSION = 4
+const DB_VERSION = 5
 const STORE_TASKS = 'tasks'
 const STORE_IMAGES = 'images'
 const STORE_THUMBNAILS = 'thumbnails'
 const STORE_AGENT_CONVERSATIONS = 'agentConversations'
 const STORE_AGENT_CONTEXT_IMAGES = 'agentContextImages'
+const STORE_METADATA = 'metadata'
+const REBUILDABLE_CACHE_EPOCH_KEY = 'rebuildableCacheEpoch'
 const THUMBNAIL_MAX_SIZE = 720
 const THUMBNAIL_QUALITY = 0.9
 const THUMBNAIL_VERSION = 2
 
 export const CURRENT_THUMBNAIL_VERSION = THUMBNAIL_VERSION
 
+type StoreSummary = {
+  count: number
+  logicalBytes: number
+}
+
+export interface LocalDataSummary {
+  tasks: StoreSummary
+  images: StoreSummary
+  thumbnails: StoreSummary
+  agentConversations: StoreSummary
+  agentContextImages: StoreSummary
+}
+
+export const REBUILDABLE_CACHE_CLEARED_EVENT = 'gpt-image-cache-cleared'
+
+type RebuildableCacheWriteDelay = () => Promise<void>
+
+let rebuildableCacheWriteDelay: RebuildableCacheWriteDelay | null = null
+
+export function setRebuildableCacheWriteDelayForTests(delay: RebuildableCacheWriteDelay | null) {
+  rebuildableCacheWriteDelay = delay
+}
+
+function getStringBytes(value: string | undefined) {
+  return value ? new Blob([value]).size : 0
+}
+
+function getTaskLogicalBytes(task: TaskRecord) {
+  return getStringBytes(JSON.stringify(task))
+}
+
+function getAgentConversationLogicalBytes(conversation: AgentConversation) {
+  return getStringBytes(JSON.stringify(conversation))
+}
+
+function getStoreSummary<T>(
+  store: IDBObjectStore,
+  getLogicalBytes: (value: T) => number,
+): Promise<StoreSummary> {
+  return new Promise((resolve, reject) => {
+    const summary: StoreSummary = { count: 0, logicalBytes: 0 }
+    const req = store.openCursor()
+    req.onsuccess = () => {
+      const cursor = req.result
+      if (!cursor) {
+        resolve(summary)
+        return
+      }
+      summary.count += 1
+      summary.logicalBytes += getLogicalBytes(cursor.value as T)
+      cursor.continue()
+    }
+    req.onerror = () => reject(req.error)
+  })
+}
+
+type MetadataRecord = {
+  id: string
+  value: unknown
+}
+
+function getEpochFromRecord(record: MetadataRecord | undefined) {
+  return typeof record?.value === 'number' && Number.isFinite(record.value) ? record.value : 0
+}
+
+async function waitForRebuildableCacheWriteDelay() {
+  if (rebuildableCacheWriteDelay) await rebuildableCacheWriteDelay()
+}
+
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
+    assertLocalDataAccess()
     const req = indexedDB.open(DB_NAME, DB_VERSION)
     req.onupgradeneeded = (e) => {
       const db = (e.target as IDBOpenDBRequest).result
@@ -34,8 +107,13 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_AGENT_CONTEXT_IMAGES)) {
         db.createObjectStore(STORE_AGENT_CONTEXT_IMAGES, { keyPath: 'id' })
       }
+      if (!db.objectStoreNames.contains(STORE_METADATA)) {
+        db.createObjectStore(STORE_METADATA, { keyPath: 'id' })
+      }
     }
     req.onsuccess = () => {
+      try { assertLocalDataAccess() }
+      catch (error) { req.result.close(); reject(error); return }
       req.result.onversionchange = () => req.result.close()
       resolve(req.result)
     }
@@ -129,6 +207,20 @@ export function clearTasks(): Promise<undefined> {
   return dbTransaction(STORE_TASKS, 'readwrite', (s) => s.clear())
 }
 
+export async function clearLocalHistory() {
+  const db = await openDB()
+  return new Promise<void>((resolve, reject) => {
+    const stores = [STORE_TASKS, STORE_AGENT_CONVERSATIONS, STORE_IMAGES, STORE_THUMBNAILS, STORE_AGENT_CONTEXT_IMAGES]
+    const tx = db.transaction([...stores, STORE_METADATA], 'readwrite')
+    for (const name of stores) tx.objectStore(name).clear()
+    const metadata = tx.objectStore(STORE_METADATA)
+    const epoch = metadata.get(REBUILDABLE_CACHE_EPOCH_KEY)
+    epoch.onsuccess = () => metadata.put({ id: REBUILDABLE_CACHE_EPOCH_KEY, value: getEpochFromRecord(epoch.result) + 1 })
+    tx.oncomplete = () => { db.close(); resolve() }
+    tx.onerror = tx.onabort = () => { db.close(); reject(tx.error ?? new Error('本地数据清理失败')) }
+  })
+}
+
 // ===== Agent conversations =====
 
 export function getAllAgentConversations(): Promise<AgentConversation[]> {
@@ -167,6 +259,131 @@ export function replaceAgentConversations(conversations: AgentConversation[]): P
   )
 }
 
+export function getLocalDataSummary(): Promise<LocalDataSummary> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction([
+          STORE_TASKS,
+          STORE_IMAGES,
+          STORE_THUMBNAILS,
+          STORE_AGENT_CONVERSATIONS,
+          STORE_AGENT_CONTEXT_IMAGES,
+        ], 'readonly')
+        Promise.all([
+          getStoreSummary<TaskRecord>(
+            tx.objectStore(STORE_TASKS),
+            getTaskLogicalBytes,
+          ),
+          getStoreSummary<StoredImage>(
+            tx.objectStore(STORE_IMAGES),
+            (image) => getStringBytes(image.dataUrl),
+          ),
+          getStoreSummary<StoredImageThumbnail>(
+            tx.objectStore(STORE_THUMBNAILS),
+            (thumbnail) => getStringBytes(thumbnail.thumbnailDataUrl),
+          ),
+          getStoreSummary<AgentConversation>(
+            tx.objectStore(STORE_AGENT_CONVERSATIONS),
+            getAgentConversationLogicalBytes,
+          ),
+          getStoreSummary<StoredAgentContextImage>(
+            tx.objectStore(STORE_AGENT_CONTEXT_IMAGES),
+            (image) => getStringBytes(image.dataUrl),
+          ),
+        ])
+          .then(([tasks, images, thumbnails, agentConversations, agentContextImages]) => {
+            db.close()
+            resolve({ tasks, images, thumbnails, agentConversations, agentContextImages })
+          })
+          .catch((error) => {
+            tx.abort()
+            db.close()
+            reject(error)
+          })
+        tx.onerror = () => {
+          db.close()
+          reject(tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(tx.error)
+        }
+      }),
+  )
+}
+
+export function clearRebuildableImageStores(): Promise<undefined> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const tx = db.transaction([STORE_THUMBNAILS, STORE_AGENT_CONTEXT_IMAGES, STORE_METADATA], 'readwrite')
+        tx.objectStore(STORE_THUMBNAILS).clear()
+        tx.objectStore(STORE_AGENT_CONTEXT_IMAGES).clear()
+        const metadataStore = tx.objectStore(STORE_METADATA)
+        const epochReq = metadataStore.get(REBUILDABLE_CACHE_EPOCH_KEY)
+        epochReq.onsuccess = () => {
+          const epoch = getEpochFromRecord(epochReq.result as MetadataRecord | undefined)
+          metadataStore.put({ id: REBUILDABLE_CACHE_EPOCH_KEY, value: epoch + 1 })
+        }
+        tx.oncomplete = () => {
+          db.close()
+          resolve(undefined)
+        }
+        tx.onerror = () => {
+          db.close()
+          reject(tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(tx.error)
+        }
+      }),
+  )
+}
+
+export function getRebuildableCacheEpoch(): Promise<number> {
+  return dbTransaction(STORE_METADATA, 'readonly', (s) => s.get(REBUILDABLE_CACHE_EPOCH_KEY))
+    .then((record) => getEpochFromRecord(record as MetadataRecord | undefined))
+}
+
+function putImageThumbnailIfEpochMatches(thumbnail: StoredImageThumbnail, expectedEpoch: number): Promise<boolean> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        let saved = false
+        const tx = db.transaction([STORE_THUMBNAILS, STORE_METADATA], 'readwrite')
+        const metadataStore = tx.objectStore(STORE_METADATA)
+        const epochReq = metadataStore.get(REBUILDABLE_CACHE_EPOCH_KEY)
+        epochReq.onsuccess = () => {
+          const epoch = getEpochFromRecord(epochReq.result as MetadataRecord | undefined)
+          if (epoch !== expectedEpoch) return
+          const putReq = tx.objectStore(STORE_THUMBNAILS).put(thumbnail)
+          putReq.onsuccess = () => {
+            saved = true
+          }
+        }
+        tx.oncomplete = () => {
+          db.close()
+          resolve(saved)
+        }
+        tx.onerror = () => {
+          db.close()
+          reject(tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(tx.error)
+        }
+      }),
+  )
+}
+
+async function saveImageThumbnailIfEpochMatches(thumbnail: StoredImageThumbnail, expectedEpoch: number) {
+  await waitForRebuildableCacheWriteDelay()
+  return putImageThumbnailIfEpochMatches(thumbnail, expectedEpoch)
+}
+
 // ===== Images =====
 
 export function getImage(id: string): Promise<StoredImage | undefined> {
@@ -202,6 +419,7 @@ export async function getImageThumbnail(id: string): Promise<StoredImageThumbnai
 
   const image = await getImage(id)
   if (!image) return undefined
+  const epoch = await getRebuildableCacheEpoch()
   const legacyImage = image as StoredImage & Partial<StoredImageThumbnail>
   if (legacyImage.thumbnailDataUrl && legacyImage.thumbnailVersion === THUMBNAIL_VERSION) {
     const thumbnail: StoredImageThumbnail = {
@@ -211,7 +429,7 @@ export async function getImageThumbnail(id: string): Promise<StoredImageThumbnai
       height: legacyImage.height,
       thumbnailVersion: THUMBNAIL_VERSION,
     }
-    await putImageThumbnail(thumbnail)
+    await saveImageThumbnailIfEpochMatches(thumbnail, epoch)
     if ((!image.width || !image.height) && thumbnail.width && thumbnail.height) {
       await putImage({ ...image, width: thumbnail.width, height: thumbnail.height })
     }
@@ -227,7 +445,7 @@ export async function getImageThumbnail(id: string): Promise<StoredImageThumbnai
     height: metadata.height,
     thumbnailVersion: THUMBNAIL_VERSION,
   }
-  await putImageThumbnail(thumbnail)
+  await saveImageThumbnailIfEpochMatches(thumbnail, epoch)
   if (metadata.width && metadata.height && (image.width !== metadata.width || image.height !== metadata.height)) {
     await putImage({ ...image, width: metadata.width, height: metadata.height })
   }
@@ -327,18 +545,30 @@ export function clearImages(): Promise<undefined> {
   )
 }
 
-export function putAgentContextImageIfSourceMatches(record: StoredAgentContextImage, sourceDataUrl: string): Promise<boolean> {
-  return openDB().then(
+export function putAgentContextImageIfSourceMatches(record: StoredAgentContextImage, sourceDataUrl: string, expectedEpoch?: number): Promise<boolean> {
+  return waitForRebuildableCacheWriteDelay().then(() => openDB()).then(
     (db) =>
       new Promise((resolve, reject) => {
         let saved = false
-        const tx = db.transaction([STORE_IMAGES, STORE_AGENT_CONTEXT_IMAGES], 'readwrite')
+        const tx = db.transaction([STORE_IMAGES, STORE_AGENT_CONTEXT_IMAGES, STORE_METADATA], 'readwrite')
         const imageStore = tx.objectStore(STORE_IMAGES)
         const agentContextImageStore = tx.objectStore(STORE_AGENT_CONTEXT_IMAGES)
         const sourceReq = imageStore.get(record.id)
         sourceReq.onsuccess = () => {
           const source = sourceReq.result as StoredImage | undefined
           if (!source || source.dataUrl !== sourceDataUrl) return
+          if (typeof expectedEpoch === 'number') {
+            const epochReq = tx.objectStore(STORE_METADATA).get(REBUILDABLE_CACHE_EPOCH_KEY)
+            epochReq.onsuccess = () => {
+              const epoch = getEpochFromRecord(epochReq.result as MetadataRecord | undefined)
+              if (epoch !== expectedEpoch) return
+              const putReq = agentContextImageStore.put(record)
+              putReq.onsuccess = () => {
+                saved = true
+              }
+            }
+            return
+          }
           const putReq = agentContextImageStore.put(record)
           putReq.onsuccess = () => {
             saved = true
@@ -420,6 +650,7 @@ async function persistImageWithSize(dataUrl: string, source: NonNullable<StoredI
   const id = await hashDataUrl(dataUrl)
   const existing = await getImage(id)
   if (!existing) {
+    const epoch = await getRebuildableCacheEpoch()
     const thumbnail = await safeCreateImageThumbnail(dataUrl)
     await putImage({
       id,
@@ -430,18 +661,19 @@ async function persistImageWithSize(dataUrl: string, source: NonNullable<StoredI
       height: thumbnail.height,
     })
     if (thumbnail.thumbnailDataUrl) {
-      await putImageThumbnail({
+      await saveImageThumbnailIfEpochMatches({
         id,
         thumbnailDataUrl: thumbnail.thumbnailDataUrl,
         width: thumbnail.width,
         height: thumbnail.height,
         thumbnailVersion: THUMBNAIL_VERSION,
-      })
+      }, epoch)
     }
     return { id, width: thumbnail.width, height: thumbnail.height }
   }
 
   if ((await getStoredImageThumbnail(id))?.thumbnailVersion !== THUMBNAIL_VERSION) {
+    const epoch = await getRebuildableCacheEpoch()
     const thumbnail = await safeCreateImageThumbnail(existing.dataUrl)
     const width = thumbnail.width ?? existing.width
     const height = thumbnail.height ?? existing.height
@@ -449,17 +681,34 @@ async function persistImageWithSize(dataUrl: string, source: NonNullable<StoredI
       await putImage({ ...existing, width: thumbnail.width, height: thumbnail.height })
     }
     if (thumbnail.thumbnailDataUrl) {
-      await putImageThumbnail({
+      await saveImageThumbnailIfEpochMatches({
         id,
         thumbnailDataUrl: thumbnail.thumbnailDataUrl,
         width: thumbnail.width,
         height: thumbnail.height,
         thumbnailVersion: THUMBNAIL_VERSION,
-      })
+      }, epoch)
     }
     return { id, width, height }
   }
   return { id, width: existing.width, height: existing.height }
+}
+
+export async function rebuildImageThumbnailForTests(id: string): Promise<StoredImageThumbnail | undefined> {
+  const image = await getImage(id)
+  if (!image) return undefined
+  const epoch = await getRebuildableCacheEpoch()
+  const metadata = await safeCreateImageThumbnail(image.dataUrl)
+  if (!metadata.thumbnailDataUrl) return undefined
+  const thumbnail: StoredImageThumbnail = {
+    id,
+    thumbnailDataUrl: metadata.thumbnailDataUrl,
+    width: metadata.width,
+    height: metadata.height,
+    thumbnailVersion: THUMBNAIL_VERSION,
+  }
+  const saved = await saveImageThumbnailIfEpochMatches(thumbnail, epoch)
+  return saved ? thumbnail : undefined
 }
 
 function loadImage(dataUrl: string): Promise<HTMLImageElement> {

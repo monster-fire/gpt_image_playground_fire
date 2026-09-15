@@ -11,6 +11,16 @@ import { normalizePersistedState } from './lib/persistedState'
 import { setPresetConfig } from './lib/presetConfig'
 import { clearNasConfig, saveNasSettings } from './lib/nasConfig'
 import { getTaskApiProfile } from './lib/taskRecovery'
+const nasAuthMock = vi.hoisted(() => ({
+  enabled: false,
+  nasFetch: vi.fn((url: string, init?: RequestInit) => fetch(url, init)),
+  providerFetch: vi.fn((url: string, init?: RequestInit) => fetch(url, init)),
+}))
+vi.mock('./lib/nasAuth', () => ({
+  isNasAuthEnabled: vi.fn(() => nasAuthMock.enabled),
+  nasFetch: nasAuthMock.nasFetch,
+  providerFetch: nasAuthMock.providerFetch,
+}))
 vi.mock('./lib/db', () => {
   const tasks = new Map<string, TaskRecord>()
   const images = new Map<string, StoredImage>()
@@ -22,11 +32,12 @@ vi.mock('./lib/db', () => {
     CURRENT_THUMBNAIL_VERSION: 2,
     getAgentContextImage: async () => undefined,
     putAgentContextImageIfSourceMatches: async () => true,
-    getAllTasks: async () => [...tasks.values()],
-    putTask: async (task: TaskRecord) => {
+    getRebuildableCacheEpoch: async () => 0,
+    getAllTasks: vi.fn(async () => [...tasks.values()]),
+    putTask: vi.fn(async (task: TaskRecord) => {
       tasks.set(task.id, task)
       return task.id
-    },
+    }),
     deleteTask: vi.fn(async (id: string) => {
       tasks.delete(id)
     }),
@@ -38,11 +49,11 @@ vi.mock('./lib/db', () => {
     clearTasks: async () => {
       tasks.clear()
     },
-    getAllAgentConversations: async () => [...agentConversations.values()],
-    putAgentConversation: async (conversation: AgentConversation) => {
+    getAllAgentConversations: vi.fn(async () => [...agentConversations.values()]),
+    putAgentConversation: vi.fn(async (conversation: AgentConversation) => {
       agentConversations.set(conversation.id, conversation)
       return conversation.id
-    },
+    }),
     deleteAgentConversation: async (id: string) => {
       agentConversations.delete(id)
     },
@@ -75,19 +86,19 @@ vi.mock('./lib/db', () => {
       images.clear()
       thumbnails.clear()
     },
-    storeImage: async (dataUrl: string, source: StoredImage['source'] = 'upload') => {
+    storeImage: vi.fn(async (dataUrl: string, source: StoredImage['source'] = 'upload') => {
       const id = `stored-image-${++imageSeq}`
       images.set(id, { id, dataUrl, source, createdAt: Date.now() })
       return id
-    },
-    storeImageWithSize: async (dataUrl: string, source: StoredImage['source'] = 'upload') => {
+    }),
+    storeImageWithSize: vi.fn(async (dataUrl: string, source: StoredImage['source'] = 'upload') => {
       const id = `stored-image-${++imageSeq}`
       const size = dataUrl.match(/(\d+)x(\d+)/)
       const width = size ? Number(size[1]) : undefined
       const height = size ? Number(size[2]) : undefined
       images.set(id, { id, dataUrl, source, createdAt: Date.now(), width, height })
       return { id, width, height }
-    },
+    }),
   }
 })
 vi.mock('./lib/api', () => ({
@@ -135,17 +146,34 @@ vi.mock('./lib/agentApi', async (importOriginal) => {
     })),
   }
 })
-import { clearAgentConversations, clearImages, clearTasks, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getImage, getStoredFreshImageThumbnail, putAgentConversation, putImage, putImageThumbnail, putTask as putDbTask } from './lib/db'
+vi.mock('./lib/localDataActivity', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/localDataActivity')>()
+  return {
+    ...actual,
+    registerLocalDataActivityChecker: vi.fn(() => () => {}),
+  }
+})
+import { clearAgentConversations, clearImages, clearTasks, commitTaskDeletion, deleteImage as deleteDbImage, deleteTask as deleteDbTask, getAllAgentConversations, getAllImageIds, getAllTasks, getImage, getStoredFreshImageThumbnail, putAgentConversation, putImage, putImageThumbnail, putTask as putDbTask, storeImage, storeImageWithSize } from './lib/db'
 import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, reuseConfig, retryTask, stopAgentResponse, stopAllActiveRequests, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { clearData, clearFailedTasks, commitDataImport, deleteFavoriteCollection, editOutputs, exportData, getErrorToastMessage, getPersistedState, importData, initStore, previewDataImport, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, reuseConfig, retryTask, stopAgentResponse, stopAllActiveRequests, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
 const deleteDbTaskImplementation = vi.mocked(deleteDbTask).getMockImplementation()!
 const callBatchImageSingleImplementation = vi.mocked(callBatchImageSingle).getMockImplementation()!
+
+afterEach(() => {
+  nasAuthMock.enabled = false
+  nasAuthMock.nasFetch.mockReset().mockImplementation((url: string, init?: RequestInit) => fetch(url, init))
+  nasAuthMock.providerFetch.mockClear()
+  vi.mocked(commitTaskDeletion).mockImplementation(commitTaskDeletionImplementation)
+  vi.mocked(deleteDbImage).mockImplementation(deleteDbImageImplementation)
+  vi.mocked(deleteDbTask).mockImplementation(deleteDbTaskImplementation)
+  vi.mocked(callBatchImageSingle).mockImplementation(callBatchImageSingleImplementation)
+})
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' }
 const imageB = { id: 'image-b', dataUrl: 'data:image/png;base64,b' }
@@ -2227,7 +2255,7 @@ describe('agent round deletion', () => {
     expect(useStore.getState().agentConversations[0].messages.map((message) => message.id)).toEqual(['message-concurrent'])
   })
 
-  it('reports a warning when both atomic persistence and its fallback fail after deletion', async () => {
+  it('keeps state unchanged when both atomic persistence and its fallback fail', async () => {
     const conversation = agentConversation({
       activeRoundId: 'round-a',
       rounds: [{
@@ -2253,12 +2281,11 @@ describe('agent round deletion', () => {
     vi.mocked(deleteDbTask).mockRejectedValueOnce(new Error('fallback failed'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    const result = await useStore.getState().deleteAgentRound(conversation.id, 'round-a')
+    await expect(useStore.getState().deleteAgentRound(conversation.id, 'round-a')).rejects.toThrow('fallback failed')
 
-    expect(result).toBe('deleted-with-warning')
-    expect(useStore.getState().tasks).toEqual([])
-    expect(useStore.getState().agentConversations[0].rounds).toEqual([])
-    expect(warn).toHaveBeenCalledWith('Agent 轮次已删除，但持久化或图片清理失败', expect.any(Error))
+    expect(useStore.getState().tasks).toHaveLength(1)
+    expect(useStore.getState().agentConversations[0].rounds).toHaveLength(1)
+    expect(warn).toHaveBeenCalledWith('原子清理任务关联数据失败，改用逐项持久化', expect.any(Error))
     warn.mockRestore()
     vi.mocked(commitTaskDeletion).mockImplementation(commitTaskDeletionImplementation)
     vi.mocked(deleteDbTask).mockImplementation(deleteDbTaskImplementation)
@@ -2304,7 +2331,7 @@ describe('agent round deletion', () => {
     expect(useStore.getState().tasks).toEqual([])
     expect(useStore.getState().agentConversations[0].rounds).toEqual([])
     expect(await getImage(imageId)).toBeDefined()
-    expect(warn).toHaveBeenCalledWith('Agent 轮次已删除，但持久化或图片清理失败', expect.any(Error))
+    expect(warn).toHaveBeenCalledWith('任务已删除，但图片清理失败', expect.any(Error))
     warn.mockRestore()
     vi.mocked(deleteDbImage).mockImplementation(deleteDbImageImplementation)
     await clearImages()
@@ -2761,6 +2788,252 @@ describe('data import', () => {
     const imported = await importData([part1], { importConfig: true, importTasks: false })
 
     expect(imported).toBe(true)
+  })
+
+  it('returns export result details for the backup panel', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date('2026-09-15T00:00:00.000Z'))
+    await clearTasks()
+    await clearImages()
+    await putDbTask(task({ id: 'export-task', outputImages: ['export-image'], createdAt: Date.now() }))
+    await putImage({ id: 'export-image', dataUrl: 'data:image/png;base64,AQI=', createdAt: Date.now() })
+    const clicked: string[] = []
+    const originalDocument = globalThis.document
+    const originalUrl = globalThis.URL
+    vi.stubGlobal('document', {
+      body: { appendChild: vi.fn() },
+      createElement: vi.fn(() => ({
+        href: '',
+        download: '',
+        click: () => clicked.push('click'),
+        remove: vi.fn(),
+      })),
+    })
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:backup'),
+      revokeObjectURL: vi.fn(),
+    })
+
+    try {
+      const result = await exportData({ exportTasks: true, exportImages: true, exportThumbnails: false })
+
+      expect(result).toMatchObject({ partCount: 1, taskCount: 1, imageCount: 1 })
+      expect(result?.messages.join('\n')).toContain('任务 1 个')
+      expect(clicked).toEqual(['click'])
+    } finally {
+      vi.stubGlobal('document', originalDocument)
+      vi.stubGlobal('URL', originalUrl)
+      vi.useRealTimers()
+    }
+  })
+
+  it('allows confirmed missing image references during commit', async () => {
+    await clearTasks()
+    await clearImages()
+    const importedTask = task({ id: 'confirmed-missing-task', inputImageIds: ['missing-image'] })
+    const preview = await previewDataImport([importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      tasks: [importedTask],
+      imageFiles: {},
+    })])
+
+    const results = await commitDataImport(preview, {
+      tasks: true,
+      images: false,
+      thumbnails: false,
+      config: false,
+      preferences: false,
+      presets: false,
+      overwrite: false,
+      missingConfirmed: true,
+    })
+
+    expect(results.join('\n')).toContain('本地数据已完成')
+    expect((await getAllTasks()).some((item) => item.id === importedTask.id)).toBe(true)
+  })
+
+  it('does not load server presets when preset scope is not selected during preview', async () => {
+    nasAuthMock.nasFetch.mockClear()
+    const file = importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      promptPresets: [{ id: 'preset-backup', name: 'preset', content: 'content' }],
+      imageFiles: {},
+    } as ExportData & { promptPresets: Array<{ id: string; name: string; content: string }> })
+
+    const preview = await previewDataImport([file], { tasks: false, images: false, thumbnails: false, config: false, preferences: false, presets: false })
+
+    expect(preview.counts.promptPresets).toBe(1)
+    expect(nasAuthMock.nasFetch).not.toHaveBeenCalledWith('/api/prompt-presets')
+  })
+
+
+
+  it('imports preferences without reading local task or conversation stores', async () => {
+    vi.mocked(getAllTasks).mockClear()
+    vi.mocked(getAllAgentConversations).mockClear()
+    const preview = await previewDataImport([importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      preferences: { enterSubmit: false },
+      imageFiles: {},
+    })], { tasks: false, images: false, thumbnails: false, config: false, preferences: true, presets: false })
+
+    const results = await commitDataImport(preview, {
+      tasks: false,
+      images: false,
+      thumbnails: false,
+      config: false,
+      preferences: true,
+      presets: false,
+      overwrite: false,
+    })
+
+    expect(results).toContain('界面偏好已导入')
+    expect(getAllTasks).not.toHaveBeenCalled()
+    expect(getAllAgentConversations).not.toHaveBeenCalled()
+    expect(nasAuthMock.nasFetch).not.toHaveBeenCalled()
+  })
+
+  it('reports partial results when commit is cancelled after completed local writes', async () => {
+    await clearTasks()
+    const controller = new AbortController()
+    const preview = await previewDataImport([importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      tasks: [task({ id: 'cancel-import-a' }), task({ id: 'cancel-import-b' })],
+      imageFiles: {},
+    })])
+    const progress = vi.fn(() => controller.abort())
+
+    const results = await commitDataImport(preview, {
+      tasks: true,
+      images: false,
+      thumbnails: false,
+      config: false,
+      preferences: false,
+      presets: false,
+      overwrite: false,
+      signal: controller.signal,
+      onProgress: progress,
+    })
+
+    expect(results.join('\n')).toContain('本地已完成 1 项')
+    expect((await getAllTasks()).some((item) => item.id === 'cancel-import-a')).toBe(true)
+    expect((await getAllTasks()).some((item) => item.id === 'cancel-import-b')).toBe(false)
+  })
+
+  it('reports partial results when quota error interrupts local commit', async () => {
+    await clearTasks()
+    const preview = await previewDataImport([importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      tasks: [task({ id: 'quota-import-a' }), task({ id: 'quota-import-b' })],
+      imageFiles: {},
+    })])
+    const putTaskImpl = vi.mocked(putDbTask).getMockImplementation() as (task: TaskRecord) => Promise<IDBValidKey>
+    vi.mocked(putDbTask)
+      .mockImplementationOnce(async (item: TaskRecord) => putTaskImpl(item))
+      .mockRejectedValueOnce(new DOMException('QuotaExceededError', 'QuotaExceededError'))
+
+    try {
+      const results = await commitDataImport(preview, {
+        tasks: true,
+        images: false,
+        thumbnails: false,
+        config: false,
+        preferences: false,
+        presets: false,
+        overwrite: false,
+      })
+
+      expect(results.join('\n')).toContain('本地已完成 1 项')
+      expect(results.join('\n')).toContain('QuotaExceededError')
+      expect((await getAllTasks()).some((item) => item.id === 'quota-import-a')).toBe(true)
+      expect((await getAllTasks()).some((item) => item.id === 'quota-import-b')).toBe(false)
+    } finally {
+      vi.mocked(putDbTask).mockImplementation(putTaskImpl)
+    }
+
+  })
+
+  it('reports API config conflicts only when config scope is selected', async () => {
+    const backupProfile = createDefaultOpenAIProfile({ id: 'shared-profile', apiKey: 'backup-key', model: 'backup-model' })
+    const currentProfile = createDefaultOpenAIProfile({ id: 'shared-profile', apiKey: 'current-key', model: 'current-model' })
+    const file = importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [backupProfile], activeProfileId: backupProfile.id }),
+      imageFiles: {},
+    })
+    nasAuthMock.nasFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/api-config') return new Response(JSON.stringify({ config: { profiles: [currentProfile], activeProfileId: currentProfile.id }, revision: 'rev-current' }), { status: 200 })
+      return new Response('{}', { status: 404 })
+    })
+
+    const noConfigPreview = await previewDataImport([file], { tasks: false, images: false, thumbnails: false, config: false, preferences: false, presets: false })
+    expect(noConfigPreview.conflicts.settings).toEqual([])
+    expect(nasAuthMock.nasFetch).not.toHaveBeenCalledWith('/api/api-config')
+
+    const configPreview = await previewDataImport([file], { tasks: false, images: false, thumbnails: false, config: true, preferences: false, presets: false })
+    expect(configPreview.conflicts.settings).toEqual([{ id: 'profile:shared-profile', status: 'different' }])
+  })
+
+  it('rechecks task conflicts at commit time', async () => {
+    await clearTasks()
+    const importedTask = task({ id: 'task-new-conflict', prompt: 'imported' })
+    const preview = await previewDataImport([importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      tasks: [importedTask],
+      imageFiles: {},
+    })])
+    await putDbTask(task({ id: importedTask.id, prompt: 'local-new' }))
+
+    const results = await commitDataImport(preview, {
+      tasks: true,
+      images: false,
+      thumbnails: false,
+      config: false,
+      preferences: false,
+      presets: false,
+      overwrite: false,
+    })
+
+    expect(results.join('\n')).toContain('任务 task-new-conflict 在预检后发生变化')
+    expect((await getAllTasks()).find((item) => item.id === importedTask.id)?.prompt).toBe('local-new')
+  })
+
+  it('reports thumbnail-only export without counting original images', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.setSystemTime(new Date('2026-09-15T00:00:00.000Z'))
+    await clearTasks()
+    await clearImages()
+    await putDbTask(task({ id: 'thumb-task', outputImages: ['thumb-image'], createdAt: Date.now() }))
+    await putImage({ id: 'thumb-image', dataUrl: 'data:image/png;base64,AQI=', createdAt: Date.now() })
+    await putImageThumbnail({ id: 'thumb-image', thumbnailDataUrl: 'data:image/png;base64,AQ==', thumbnailVersion: 2 })
+    const clicked: string[] = []
+    const originalDocument = globalThis.document
+    const originalUrl = globalThis.URL
+    vi.stubGlobal('document', {
+      body: { appendChild: vi.fn() },
+      createElement: vi.fn(() => ({ href: '', download: '', click: () => clicked.push('click'), remove: vi.fn() })),
+    })
+    vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:backup'), revokeObjectURL: vi.fn() })
+
+    try {
+      const result = await exportData({ exportTasks: false, exportImages: false, exportThumbnails: true })
+
+      expect(result.imageCount).toBe(0)
+      expect(result.thumbnailCount).toBe(1)
+      expect(result.messages.join('\n')).toContain('原图 0 张，缩略图 1 张')
+      expect(clicked).toEqual(['click'])
+    } finally {
+      vi.stubGlobal('document', originalDocument)
+      vi.stubGlobal('URL', originalUrl)
+      vi.useRealTimers()
+    }
   })
 
 })
@@ -4745,6 +5018,53 @@ describe('agent built-in image tool failure', () => {
     expect(JSON.stringify(round.responseOutput)).not.toContain('late-abort-base64')
   })
 
+  it('does not commit a built-in image result when the round is stopped after storing the image', async () => {
+    let taskId = ''
+    let markImageWriteStarted: () => void = () => {}
+    const imageWriteStarted = new Promise<void>((resolve) => { markImageWriteStarted = resolve })
+    let releaseImageWrite: (value: Awaited<ReturnType<typeof storeImageWithSize>>) => void = () => {}
+    const imageWrite = new Promise<Awaited<ReturnType<typeof storeImageWithSize>>>((resolve) => { releaseImageWrite = resolve })
+    vi.mocked(storeImageWithSize).mockImplementationOnce(() => {
+      markImageWriteStarted()
+      return imageWrite
+    })
+    vi.mocked(callAgentResponsesApi).mockImplementationOnce(async (opts) => {
+      await opts.onImageToolStarted?.({ toolCallId: 'ig-stopped-after-store' })
+      const runningTask = useStore.getState().tasks.find((item) => item.agentToolCallId === 'ig-stopped-after-store')
+      if (!runningTask) throw new Error('Agent task was not created')
+      taskId = runningTask.id
+      const completed = opts.onImageToolCompleted?.({
+        toolCallId: 'ig-stopped-after-store',
+        dataUrl: 'data:image/png;base64,late-agent-output',
+      })
+      await imageWriteStarted
+      stopAgentResponse('conversation-a')
+      releaseImageWrite({ id: 'late-image', width: 1024, height: 1024 })
+      await completed
+      return {
+        text: '',
+        images: [],
+        outputItems: [],
+        responseId: 'response-stopped-after-store',
+      }
+    })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => {
+      expect(useStore.getState().tasks.find((item) => item.id === taskId)).toMatchObject({
+        status: 'error',
+        error: '已停止生成。',
+        outputImages: [],
+      })
+    })
+
+    expect(await getAllImageIds()).toEqual([])
+    expect(useStore.getState().agentConversations[0].rounds[0]).toMatchObject({
+      status: 'error',
+      error: '已停止生成。',
+    })
+  })
+
   it('deletes a stopped round while its aborted controller is still awaiting cleanup', async () => {
     const response = deferred<Awaited<ReturnType<typeof callAgentResponsesApi>>>()
     vi.mocked(callAgentResponsesApi).mockImplementationOnce(() => response.promise)
@@ -5320,6 +5640,98 @@ describe('task retry API profile', () => {
   const profileA = createDefaultOpenAIProfile({ id: 'profile-a', name: '配置 A', apiKey: 'key-a', model: 'model-a' })
   const profileB = createDefaultOpenAIProfile({ id: 'profile-b', name: '配置 B', apiKey: 'key-b', model: 'model-b' })
 
+
+  it('previews and commits import while rechecking image conflicts at commit time', async () => {
+    await clearTasks()
+    await clearImages()
+    const importedTask = task({ id: 'preview-task', outputImages: ['preview-image'] })
+    const file = importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      tasks: [importedTask],
+      imageFiles: { 'preview-image': { path: 'images/preview.png' } },
+    }, { 'images/preview.png': new Uint8Array([1, 2]) })
+
+    const preview = await previewDataImport([file])
+    await putImage({ id: 'preview-image', dataUrl: 'data:image/png;base64,different' })
+    const results = await commitDataImport(preview, {
+      tasks: true,
+      images: true,
+      thumbnails: false,
+      config: false,
+      preferences: false,
+      presets: false,
+      overwrite: false,
+    })
+
+    expect(results.join('\n')).toContain('原图 preview-image 在预检后发生变化')
+    expect(await getImage('preview-image')).toMatchObject({ dataUrl: 'data:image/png;base64,different' })
+    expect((await getAllTasks()).some((item) => item.id === importedTask.id)).toBe(false)
+  })
+
+  it('recomputes missing image references against local images before commit', async () => {
+    await clearTasks()
+    await clearImages()
+    const importedTask = task({ id: 'missing-ref-task', inputImageIds: ['local-only-image'] })
+    const file = importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      tasks: [importedTask],
+      imageFiles: {},
+    })
+
+    const preview = await previewDataImport([file])
+    expect(preview.missingImageRefs).toEqual([{ ownerType: 'task', ownerId: 'missing-ref-task', imageId: 'local-only-image' }])
+    await putImage({ id: 'local-only-image', dataUrl: 'data:image/png;base64,AQI=' })
+    const results = await commitDataImport(preview, {
+      tasks: true,
+      images: false,
+      thumbnails: false,
+      config: false,
+      preferences: false,
+      presets: false,
+      overwrite: false,
+    })
+
+    expect(results.join('\n')).toContain('本地数据已完成')
+    expect((await getAllTasks()).some((item) => item.id === importedTask.id)).toBe(true)
+  })
+
+  it('normalizes favorite default when committing preview imports', async () => {
+    await clearTasks()
+    const importedCollections = [
+      { id: 'commit-collection-a', name: '提交收藏夹 A', createdAt: 1, updatedAt: 1 },
+      { id: 'commit-collection-b', name: '提交收藏夹 B', createdAt: 2, updatedAt: 2 },
+    ]
+    const importedTask = task({
+      id: 'commit-favorite-task',
+      isFavorite: true,
+      favoriteCollectionIds: [importedCollections[1].id],
+    })
+    const preview = await previewDataImport([importFile({
+      version: 3,
+      exportedAt: new Date(0).toISOString(),
+      tasks: [importedTask],
+      favoriteCollections: importedCollections,
+      defaultFavoriteCollectionId: importedCollections[1].id,
+      imageFiles: {},
+    })])
+
+    await commitDataImport(preview, {
+      tasks: true,
+      images: false,
+      thumbnails: false,
+      config: false,
+      preferences: false,
+      presets: false,
+      overwrite: false,
+    })
+
+    expect(useStore.getState().favoriteCollections).toEqual(expect.arrayContaining(importedCollections))
+    expect(useStore.getState().defaultFavoriteCollectionId).toBe(importedCollections[1].id)
+  })
+
+
   beforeEach(async () => {
     await clearTasks()
     await clearImages()
@@ -5455,6 +5867,8 @@ describe('NAS generation gates and stop', () => {
     await clearImages()
     await clearAgentConversations()
     clearNasConfig()
+    nasAuthMock.enabled = true
+    nasAuthMock.nasFetch.mockImplementation((path: string, init?: RequestInit) => fetch(path, init))
     vi.unstubAllEnvs()
     vi.mocked(callImageApi).mockClear()
     vi.mocked(callAgentResponsesApi).mockClear()
@@ -5472,11 +5886,12 @@ describe('NAS generation gates and stop', () => {
 
   afterEach(() => {
     clearNasConfig()
+    nasAuthMock.enabled = false
+    nasAuthMock.nasFetch.mockReset()
     vi.unstubAllEnvs()
   })
 
   it('waits for NAS configuration before submitting generation', async () => {
-    vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'true')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 409 })))
     await expect(saveNasSettings(useStore.getState().settings)).rejects.toThrow('其他页面')
 
@@ -5488,19 +5903,59 @@ describe('NAS generation gates and stop', () => {
   })
 
   it('waits for NAS configuration before submitting an Agent round', async () => {
-    vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'true')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 409 })))
     await expect(saveNasSettings(useStore.getState().settings)).rejects.toThrow('其他页面')
 
     await submitAgentMessage()
 
     expect(callAgentResponsesApi).not.toHaveBeenCalled()
-    expect(useStore.getState().agentConversations).toEqual([])
+    expect(useStore.getState().agentConversations[0]?.rounds).toEqual([])
     expect(useStore.getState().showToast).toHaveBeenCalledWith('NAS 配置已被其他页面修改，请重新读取后再保存', 'error')
   })
 
+  it('keeps the original Agent input snapshot while waiting for NAS configuration', async () => {
+    const save = deferred<Response>()
+    nasAuthMock.nasFetch.mockImplementation((path: string, init?: RequestInit) => {
+      if (path === '/api/api-config' && init?.method === 'PUT') return save.promise
+      return Promise.resolve(new Response(JSON.stringify({ config: useStore.getState().settings, revision: 'rev-1' }), { status: 200 }))
+    })
+    void saveNasSettings(useStore.getState().settings).catch(() => {})
+    const conversationA = agentConversation({ id: 'conversation-a', title: 'A' })
+    const conversationB = agentConversation({ id: 'conversation-b', title: 'B' })
+    const responsesProfile = createDefaultOpenAIProfile({ id: 'responses-profile', apiKey: 'test-key', apiMode: 'responses', model: DEFAULT_RESPONSES_MODEL })
+    await putImage({ id: 'input-a', dataUrl: 'data:image/png;base64,input-a' })
+    await putImage({ id: 'input-b', dataUrl: 'data:image/png;base64,input-b' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [responsesProfile], activeProfileId: responsesProfile.id }),
+      appMode: 'agent',
+      prompt: 'first prompt',
+      inputImages: [{ id: 'input-a', dataUrl: 'data:image/png;base64,input-a' }],
+      agentConversations: [conversationA, conversationB],
+      activeAgentConversationId: 'conversation-a',
+    })
+
+    const submit = submitAgentMessage()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    useStore.setState({
+      activeAgentConversationId: 'conversation-b',
+      prompt: 'second prompt',
+      inputImages: [{ id: 'input-b', dataUrl: 'data:image/png;base64,input-b' }],
+    })
+    save.resolve(new Response(JSON.stringify({ config: useStore.getState().settings, revision: 'rev-2' }), { status: 200 }))
+    await submit
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledOnce())
+
+    const state = useStore.getState()
+    expect(state.agentConversations.find((item) => item.id === 'conversation-a')?.rounds[0]).toMatchObject({
+      prompt: 'first prompt',
+      inputImageIds: ['input-a'],
+    })
+    expect(state.agentConversations.find((item) => item.id === 'conversation-b')?.rounds).toEqual([])
+    expect(state.prompt).toBe('second prompt')
+    expect(state.inputImages.map((image) => image.id)).toEqual(['input-b'])
+  })
+
   it('marks NAS startup running and recoverable tasks interrupted without scheduling recovery', async () => {
-    vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'true')
     const falTask = task({
       id: 'fal-recoverable',
       apiProvider: 'fal',
@@ -5550,6 +6005,7 @@ describe('NAS generation gates and stop', () => {
   })
 
   it('ignores in-flight recovery results after stopping all active requests', async () => {
+    nasAuthMock.enabled = false
     const recovery = deferred<Awaited<ReturnType<typeof getFalQueuedImageResult>>>()
     vi.mocked(getFalQueuedImageResult).mockImplementationOnce(() => recovery.promise)
     const falTask = task({
@@ -5587,5 +6043,109 @@ describe('NAS generation gates and stop', () => {
       outputImages: [],
     })
     expect(await getAllImageIds()).toEqual([])
+  })
+})
+
+describe('agent submission preparation gates', () => {
+  const responsesProfile = createDefaultOpenAIProfile({ id: 'responses-profile', apiKey: 'test-key', apiMode: 'responses' })
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    stopAllActiveRequests()
+    vi.mocked(callAgentResponsesApi).mockReset().mockResolvedValue({ text: 'ok', images: [], outputItems: [], responseId: 'response-id' })
+    vi.mocked(storeImage).mockClear()
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [responsesProfile], activeProfileId: responsesProfile.id }),
+      prompt: '����ͼƬ',
+      inputImages: [{ id: 'input-a', dataUrl: 'data:image/png;base64,input-a' }],
+      maskDraft: null,
+      params: { ...DEFAULT_PARAMS },
+      tasks: [],
+      agentConversations: [agentConversation()],
+      activeAgentConversationId: 'conversation-a',
+      agentEditingRoundId: null,
+      showToast: vi.fn(),
+    })
+  })
+
+  it('stops while preparing images before sending the Agent request', async () => {
+    const imageWrite = deferred<string>()
+    vi.mocked(storeImage).mockImplementationOnce(() => imageWrite.promise)
+
+    const submit = submitAgentMessage()
+    await vi.waitFor(() => expect(storeImage).toHaveBeenCalledOnce())
+    stopAgentResponse('conversation-a')
+    imageWrite.resolve('input-a')
+    await submit
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(callAgentResponsesApi).not.toHaveBeenCalled()
+    expect(useStore.getState().agentConversations[0].rounds).toEqual([])
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('已停止生成', 'info')
+  })
+
+  it('blocks duplicate submits for the same conversation while preparation is pending', async () => {
+    const imageWrite = deferred<string>()
+    vi.mocked(storeImage).mockImplementationOnce(() => imageWrite.promise)
+
+    const first = submitAgentMessage()
+    await vi.waitFor(() => expect(storeImage).toHaveBeenCalledOnce())
+    await submitAgentMessage()
+
+    imageWrite.resolve('input-a')
+    await first
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledOnce())
+    expect(useStore.getState().agentConversations[0].rounds).toHaveLength(1)
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('正在准备上一条消息，请等待或先停止生成', 'info')
+  })
+
+  it('allows another conversation to submit while one conversation is preparing', async () => {
+    const conversationB = agentConversation({ id: 'conversation-b', title: 'B' })
+    const imageWrite = deferred<string>()
+    vi.mocked(storeImage)
+      .mockImplementationOnce(() => imageWrite.promise)
+      .mockResolvedValueOnce('input-b')
+
+    const first = submitAgentMessage()
+    await vi.waitFor(() => expect(storeImage).toHaveBeenCalledOnce())
+    useStore.setState({
+      activeAgentConversationId: 'conversation-b',
+      agentConversations: [...useStore.getState().agentConversations, conversationB],
+      prompt: '�ڶ����Ի�',
+      inputImages: [{ id: 'input-b', dataUrl: 'data:image/png;base64,input-b' }],
+    })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledOnce())
+    expect(useStore.getState().agentConversations.find((item) => item.id === 'conversation-b')?.rounds).toHaveLength(1)
+
+    imageWrite.resolve('input-a')
+    await first
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledTimes(2))
+  })
+
+  it('does not clear a different active Agent draft after preparation finishes', async () => {
+    const conversationB = agentConversation({ id: 'conversation-b', title: 'B' })
+    const imageWrite = deferred<string>()
+    vi.mocked(storeImage).mockImplementationOnce(() => imageWrite.promise)
+
+    const first = submitAgentMessage()
+    await vi.waitFor(() => expect(storeImage).toHaveBeenCalledOnce())
+    useStore.setState({
+      activeAgentConversationId: 'conversation-b',
+      agentConversations: [...useStore.getState().agentConversations, conversationB],
+      prompt: '��Ҫ���',
+      inputImages: [{ id: 'input-b', dataUrl: 'data:image/png;base64,input-b' }],
+    })
+    imageWrite.resolve('input-a')
+    await first
+    await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledOnce())
+
+    expect(useStore.getState().activeAgentConversationId).toBe('conversation-b')
+    expect(useStore.getState().prompt).toBe('��Ҫ���')
+    expect(useStore.getState().inputImages.map((image) => image.id)).toEqual(['input-b'])
+    expect(useStore.getState().agentInputDrafts['conversation-a']).toMatchObject({ prompt: '', inputImages: [] })
   })
 })

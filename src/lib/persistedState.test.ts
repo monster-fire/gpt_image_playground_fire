@@ -59,6 +59,16 @@ function fallback() {
 }
 
 describe('persisted state codec', () => {
+  it('keeps gallery preset selection and manual final text only when draft persistence is enabled', () => {
+    const draft = { galleryPromptPresetId: 'preset-a', galleryFinalPromptEdit: { text: '手改最终提示词', source: '原组合内容' } }
+    const saved = createPersistedState({ ...source({ ...DEFAULT_SETTINGS, persistInputOnRestart: true }), ...draft })
+    expect(normalizePersistedState(saved, fallback())?.state).toMatchObject(draft)
+    const disabled = createPersistedState({ ...source({ ...DEFAULT_SETTINGS, persistInputOnRestart: false }), ...draft })
+    expect(disabled.galleryPromptPresetId).toBeNull()
+    expect(disabled.galleryFinalPromptEdit).toBeNull()
+    expect(normalizePersistedState({ ...disabled, ...draft }, fallback())?.state.galleryFinalPromptEdit).toBeNull()
+    expect(normalizePersistedState({ ...saved, galleryFinalPromptEdit: { text: 123 } }, fallback())?.state.galleryFinalPromptEdit).toBeNull()
+  })
   it('omits NAS credentials and previous presets while preserving local history preferences', () => {
     vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'true')
     try {

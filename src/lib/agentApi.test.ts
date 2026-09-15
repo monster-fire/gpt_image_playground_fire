@@ -36,6 +36,24 @@ describe('parseBatchImageCallArguments', () => {
 })
 
 describe('callAgentResponsesApi', () => {
+  it('appends the preset to built-in execution instructions without changing user input or adding requests', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ output: [] })))
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: '白色针织连衣裙，落地窗旁' }] }]
+    await callAgentResponsesApi({
+      presetContent: '成年女性写真，真实摄影，自然光',
+      settings: DEFAULT_SETTINGS,
+      profile: createDefaultOpenAIProfile({ apiKey: 'mock-only', apiMode: 'responses' }),
+      params: DEFAULT_PARAMS,
+      input,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body))
+    expect(body.input).toEqual(input)
+    expect(body.instructions).toContain('成年女性写真，真实摄影，自然光')
+    expect(body.instructions).toContain('以用户本次明确要求为准')
+    expect(body.instructions).toContain('仅讨论或只要提示词时遵循用户要求')
+    expect(body.tools.length).toBeGreaterThan(0)
+  })
   afterEach(() => {
     vi.restoreAllMocks()
   })

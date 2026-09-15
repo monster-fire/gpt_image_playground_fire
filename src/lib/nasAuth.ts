@@ -5,6 +5,7 @@ let session: NasSession | null = null
 const controllers = new Set<AbortController>()
 
 export function isNasAuthEnabled() {
+  if (import.meta.env.MODE !== 'test') return true
   return readRuntimeEnv(import.meta.env.VITE_NAS_AUTH_ENABLED) === 'true'
 }
 

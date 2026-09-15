@@ -28,6 +28,7 @@ let container
 try {
   container = await docker('run', '--detach', '-p', '127.0.0.1::80',
     '-e', 'APP_PASSWORD=docker-test-only', '-e', 'COOKIE_SECURE=false', '-e', 'ENABLE_API_PROXY=true',
+    '-e', 'DEFAULT_API_URL=https://static-secret.example/v1?apiKey=runtime-static-secret',
     '-e', `API_PROXY_URL=http://host.docker.internal:${upstream.address().port}/v1`,
     '--mount', `type=bind,source=${join(directory, 'config')},target=/config`,
     '--mount', `type=bind,source=${join(directory, 'data')},target=/data`, 'gpt-image-playground:p0-test')
@@ -35,7 +36,10 @@ try {
   if (!address) throw new Error(await docker('logs', container))
   let url = `http://${address}`
   for (let attempt = 0; attempt < 100; attempt++) {
-    try { if ((await fetch(url)).ok) break } catch { /* 等待服务就绪 */ }
+    try {
+      const ready = await fetch(`${url}/api/auth/session`)
+      if (ready.status === 401 && ready.headers.get('x-app-auth-error') === 'APP_SESSION_EXPIRED') break
+    } catch { /* 等待服务就绪 */ }
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
   await docker('exec', container, 'nginx', '-t')
@@ -71,6 +75,7 @@ try {
   for (const script of scripts) {
     const text = await (await fetch(new URL(script, url))).text()
     assert.ok(!text.includes('docker-private-key') && !text.includes('docker-test-only'))
+    assert.ok(!text.includes('runtime-static-secret') && !text.includes('static-secret.example'))
     assert.ok(!text.includes('__VITE_NAS_AUTH_ENABLED_PLACEHOLDER__'))
   }
   assert.equal((await fetch(`${url}/api/auth/logout`, { method: 'POST', headers })).status, 200)

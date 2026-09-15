@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useStore } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import { useDialogFocus } from '../hooks/useDialogFocus'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { Checkbox } from './Checkbox'
 import { CopyIcon } from './icons'
@@ -44,12 +45,23 @@ function getActionButtonClass(tone: 'primary' | 'secondary' | 'danger' | 'warnin
   return 'bg-blue-500 text-white hover:bg-blue-600'
 }
 
+function getActionErrorMessage(err: unknown) {
+  if (err instanceof Error && err.message.trim()) return err.message
+  if (typeof err === 'string' && err.trim()) return err
+  return '操作失败，请重试'
+}
+
 export default function ConfirmDialog() {
   const confirmDialog = useStore((s) => s.confirmDialog)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const titleId = useId()
+  const messageId = useId()
   const [canConfirm, setCanConfirm] = useState(true)
   const [checkboxChecked, setCheckboxChecked] = useState(false)
+  const [requiredTextValue, setRequiredTextValue] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [actionError, setActionError] = useState('')
 
   useEffect(() => {
     const delay = confirmDialog?.minConfirmDelayMs ?? 0
@@ -65,6 +77,9 @@ export default function ConfirmDialog() {
 
   useEffect(() => {
     setCheckboxChecked(confirmDialog?.checkbox?.defaultChecked ?? false)
+    setRequiredTextValue('')
+    setIsSubmitting(false)
+    setActionError('')
   }, [confirmDialog])
 
   const handleClose = () => {
@@ -77,7 +92,12 @@ export default function ConfirmDialog() {
     handleClose()
   }
 
+  const closeIfCurrent = (dialog: NonNullable<typeof confirmDialog>) => {
+    if (useStore.getState().confirmDialog === dialog) setConfirmDialog(null)
+  }
+
   useCloseOnEscape(Boolean(confirmDialog) && canConfirm, handleClose)
+  useDialogFocus(Boolean(confirmDialog), dialogRef)
   usePreventBackgroundScroll(Boolean(confirmDialog))
 
   if (!confirmDialog) return null
@@ -87,6 +107,12 @@ export default function ConfirmDialog() {
   const confirmText = confirmDialog.confirmText ?? (isDestructive ? '确认删除' : '确认')
   const cancelText = confirmDialog.cancelText ?? '取消'
   const customButtons = confirmDialog.buttons?.filter((button) => button.label.trim()) ?? []
+  const showCancel = confirmDialog.showCancel !== false
+  const requiredTextMatched = !confirmDialog.requiredText || requiredTextValue === confirmDialog.requiredText
+  const canSubmitAction = canConfirm && requiredTextMatched
+  const shouldFocusRequiredText = Boolean(confirmDialog.requiredText)
+  const shouldFocusConfirm = !shouldFocusRequiredText && !showCancel
+  const shouldFocusCancel = !shouldFocusRequiredText && showCancel
 
   return (
     <div
@@ -96,10 +122,16 @@ export default function ConfirmDialog() {
     >
       <div className="absolute inset-0 bg-black/20 dark:bg-black/40 backdrop-blur-md animate-overlay-in" />
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={messageId}
+        tabIndex={-1}
         className="relative bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl border border-white/50 dark:border-white/[0.08] rounded-3xl shadow-[0_8px_40px_rgb(0,0,0,0.12)] dark:shadow-[0_8px_40px_rgb(0,0,0,0.4)] max-w-sm w-full p-6 z-10 ring-1 ring-black/5 dark:ring-white/10 animate-confirm-in"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="mb-2 flex items-center gap-2 text-base font-bold text-gray-800 dark:text-gray-100">
+        <h3 id={titleId} className="mb-2 flex items-center gap-2 text-base font-bold text-gray-800 dark:text-gray-100">
           {confirmDialog.icon === 'info' && (
             <svg className="h-5 w-5 shrink-0 text-blue-500" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
               <circle cx="12" cy="12" r="10" />
@@ -112,7 +144,7 @@ export default function ConfirmDialog() {
           )}
           {confirmDialog.title}
         </h3>
-        <p className={`text-sm text-gray-500 dark:text-gray-400 ${confirmDialog.checkbox ? 'mb-4' : 'mb-6'} leading-relaxed whitespace-pre-line ${confirmDialog.messageAlign === 'center' ? 'text-center' : ''}`}>
+        <p id={messageId} className={`text-sm text-gray-500 dark:text-gray-400 ${confirmDialog.checkbox ? 'mb-4' : 'mb-6'} leading-relaxed whitespace-pre-line ${confirmDialog.messageAlign === 'center' ? 'text-center' : ''}`}>
           {renderMessage(confirmDialog.message)}
         </p>
         {confirmDialog.checkbox && (
@@ -125,17 +157,50 @@ export default function ConfirmDialog() {
             className="mb-6"
           />
         )}
+        {confirmDialog.requiredText && (
+          <label className="mb-6 block text-sm text-gray-600 dark:text-gray-300">
+            <span className="mb-2 block">
+              请输入 <strong className="font-semibold text-gray-800 dark:text-gray-100">{confirmDialog.requiredText}</strong> 确认操作
+            </span>
+            <input
+              type="text"
+              value={requiredTextValue}
+              onChange={(event) => {
+                setRequiredTextValue(event.target.value)
+                setActionError('')
+              }}
+              data-autofocus={shouldFocusRequiredText ? true : undefined}
+              className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm text-gray-800 outline-none transition focus:border-red-400 focus:ring-2 focus:ring-red-100 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-100 dark:focus:border-red-400 dark:focus:ring-red-400/20"
+              aria-label={`输入 ${confirmDialog.requiredText} 确认操作`}
+            />
+          </label>
+        )}
+        {actionError && (
+          <div role="alert" className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200">
+            {actionError}
+          </div>
+        )}
         {customButtons.length > 0 ? (
           <div className="flex gap-2">
             {customButtons.map((button) => (
               <button
                 key={button.label}
                 onClick={() => {
-                  if (!canConfirm) return
-                  button.action(checkboxChecked)
-                  setConfirmDialog(null)
+                  if (!canSubmitAction || isSubmitting) return
+                  const dialog = confirmDialog
+                  setActionError('')
+                  setIsSubmitting(true)
+                  void (async () => {
+                    const shouldClose = await button.action(checkboxChecked)
+                    return shouldClose
+                  })()
+                    .then((shouldClose: void | boolean) => {
+                      if (shouldClose !== false) closeIfCurrent(dialog)
+                    })
+                    .catch((err) => setActionError(getActionErrorMessage(err)))
+                    .finally(() => setIsSubmitting(false))
                 }}
-                disabled={!canConfirm}
+                disabled={!canSubmitAction || isSubmitting}
                 className={`flex-1 py-2 rounded-xl text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60 ${getActionButtonClass(button.tone)}`}
               >
                 {button.label}
@@ -144,10 +209,11 @@ export default function ConfirmDialog() {
           </div>
         ) : (
           <div className="flex gap-2">
-            {confirmDialog.showCancel !== false && (
+            {showCancel && (
               <button
                 onClick={handleCancel}
                 disabled={isSubmitting}
+                data-autofocus={shouldFocusCancel ? true : undefined}
                 className="flex-1 py-2 rounded-xl border border-gray-200 dark:border-white/[0.08] text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/[0.06] transition disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {cancelText}
@@ -155,23 +221,32 @@ export default function ConfirmDialog() {
             )}
             <button
               onClick={() => {
-                if (!canConfirm || isSubmitting) return
+                if (!canSubmitAction || isSubmitting) return
+                const dialog = confirmDialog
+                setActionError('')
                 if (!confirmDialog.awaitAction) {
-                  confirmDialog.action?.(checkboxChecked)
-                  setConfirmDialog(null)
+                  try {
+                    const shouldClose = confirmDialog.action?.(checkboxChecked)
+                    if (shouldClose !== false) closeIfCurrent(dialog)
+                  } catch (err) {
+                    setActionError(getActionErrorMessage(err))
+                  }
                   return
                 }
                 setIsSubmitting(true)
                 void (async () => {
                   try {
                     const shouldClose = await confirmDialog.action?.(checkboxChecked)
-                    if (shouldClose !== false) setConfirmDialog(null)
+                    if (shouldClose !== false) closeIfCurrent(dialog)
+                  } catch (err) {
+                    setActionError(getActionErrorMessage(err))
                   } finally {
                     setIsSubmitting(false)
                   }
                 })()
               }}
-              disabled={!canConfirm || isSubmitting}
+              disabled={!canSubmitAction || isSubmitting}
+              data-autofocus={shouldFocusConfirm ? true : undefined}
               className={`flex-1 py-2 rounded-xl text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60 ${confirmClassName}`}
             >
               {confirmText}
