@@ -1,5 +1,10 @@
 import type { AppSettings, ResponsesOutputItem, TaskParams } from '../types'
 import { blobToDataUrl } from './dataUrl'
+import { providerFetch } from './nasAuth'
+import { ApiRequestError, getApiError, getNetworkApiError, sanitizeApiErrorText, sanitizeRawApiPayload, type ApiErrorContext } from './requestError'
+
+export { ApiRequestError, getApiError, getNetworkApiError, sanitizeApiErrorText, sanitizeRawApiPayload }
+export type { ApiErrorContext }
 
 export const MIME_MAP: Record<string, string> = {
   png: 'image/png',
@@ -19,6 +24,7 @@ export interface CallApiOptions {
   /** 输入图片的 data URL 列表 */
   inputImageDataUrls: string[]
   maskDataUrl?: string
+  signal?: AbortSignal
   skipCodexCliSizePrompt?: boolean
   onFalRequestEnqueued?: (request: { requestId: string; endpoint: string }) => void
   onCustomTaskEnqueued?: (task: { taskId: string }) => void
@@ -138,7 +144,7 @@ async function probeNoCorsReachability(url: string, timeoutMs = 8000): Promise<'
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const response = await fetch(url, {
+    const response = await providerFetch(url, {
       method: 'GET',
       mode: 'no-cors',
       cache: 'no-store',
@@ -157,7 +163,7 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
 
   let response: Response
   try {
-    response = await fetch(url, {
+    response = await providerFetch(url, {
       cache: 'no-store',
       signal,
     })
@@ -165,12 +171,12 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
     if (err instanceof TypeError) {
       const probe = await probeNoCorsReachability(url)
       if (probe === 'opaque') {
-        throw new Error(`图片已生成，但因服务商未允许跨域，图片链接下载失败。${IMAGE_FETCH_CORS_HINT}`)
+        throw new Error(`图片已生成，但浏览器无法读取结果链接（可能受跨域策略限制）。${IMAGE_FETCH_CORS_HINT}`)
       }
       if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         throw new Error(`图片链接下载失败（网络不可用）。${IMAGE_FETCH_CORS_HINT}`)
       }
-      throw new Error(`图片链接下载失败（可能因跨域限制、链接过期或网络异常）。${IMAGE_FETCH_CORS_HINT}`)
+      throw new Error(`图片链接下载失败（链接可能过期、网络不可达或被网关拦截）。${IMAGE_FETCH_CORS_HINT}`)
     }
     throw err
   }
@@ -183,24 +189,8 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
   return blobToDataUrl(blob, fallbackMime)
 }
 
-export async function getApiErrorMessage(response: Response): Promise<string> {
-  let errorMsg = `HTTP ${response.status}`
-  const textResponse = response.clone()
-  try {
-    const errJson = await response.json()
-    if (errJson.error?.message) errorMsg = errJson.error.message
-    else if (typeof errJson.detail === 'string') errorMsg = errJson.detail
-    else if (Array.isArray(errJson.detail)) errorMsg = errJson.detail.map((item: unknown) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
-    else if (typeof errJson.error === 'string') errorMsg = errJson.error
-    else if (errJson.message) errorMsg = errJson.message
-  } catch {
-    try {
-      errorMsg = await textResponse.text()
-    } catch {
-      /* ignore */
-    }
-  }
-  return errorMsg
+export async function getApiErrorMessage(response: Response, context?: ApiErrorContext): Promise<string> {
+  return (await getApiError(response, context)).message
 }
 
 export function pickActualParams(source: unknown): Partial<TaskParams> {

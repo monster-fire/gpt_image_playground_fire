@@ -503,7 +503,7 @@ describe('callImageApi', () => {
       prompt: 'prompt',
       params: { ...DEFAULT_PARAMS },
       inputImageDataUrls: [],
-    } as any)).rejects.toThrow('invalid character \':\' looking for beginning of value\n提示：当前使用的 API 可能不支持流式传输，请尝试关闭「流式传输」功能。')
+    } as any)).rejects.toThrow('invalid character \':\' looking for beginning of value')
   })
 
   it('preserves malformed stream event text when suggesting disabling streaming', async () => {
@@ -716,7 +716,10 @@ describe('callImageApi', () => {
       'data:image/png;base64,aW1hZ2Ut1',
       'data:image/png;base64,aW1hZ2Ut3',
     ])
-    expect(result.failedRequests).toEqual([{ requestIndex: 1, error: 'Failed to fetch' }])
+    expect(result.failedRequests).toHaveLength(1)
+    expect(result.failedRequests?.[0]?.requestIndex).toBe(1)
+    expect(result.failedRequests?.[0]?.error).toContain('网络请求失败')
+    expect(result.failedRequests?.[0]?.error).toContain('Failed to fetch')
     expect(result.actualParams).toMatchObject({ n: 2 })
   })
 
@@ -793,7 +796,10 @@ describe('callImageApi', () => {
       'data:image/png;base64,aW1hZ2Ut1',
       'data:image/png;base64,aW1hZ2Ut2',
     ])
-    expect(result.failedRequests).toEqual([{ requestIndex: 2, error: 'Failed to fetch' }])
+    expect(result.failedRequests).toHaveLength(1)
+    expect(result.failedRequests?.[0]?.requestIndex).toBe(2)
+    expect(result.failedRequests?.[0]?.error).toContain('网络请求失败')
+    expect(result.failedRequests?.[0]?.error).toContain('Failed to fetch')
     expect(result.actualParams).toMatchObject({ n: 2 })
   })
 
@@ -1099,7 +1105,10 @@ describe('callImageApi', () => {
     })
 
     expect(result.images).toHaveLength(2)
-    expect(result.failedRequests).toEqual([{ requestIndex: 1, error: 'Failed to fetch' }])
+    expect(result.failedRequests).toHaveLength(1)
+    expect(result.failedRequests?.[0]?.requestIndex).toBe(1)
+    expect(result.failedRequests?.[0]?.error).toContain('网络请求失败')
+    expect(result.failedRequests?.[0]?.error).toContain('Failed to fetch')
     expect(result.actualParams).toMatchObject({ n: 2 })
   })
 
@@ -1602,6 +1611,30 @@ describe('callImageApi', () => {
 
     await expect(promise).resolves.toEqual({
       images: ['data:image/png;base64,aW1hZ2U='],
+    })
+  })
+
+  it('throws structured diagnostics with request metrics on Images API 502', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'Upstream request failed' },
+    }), {
+      status: 502,
+      headers: { 'Content-Type': 'application/json', 'x-request-id': 'req_502' },
+    }))
+
+    await expect(callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: [],
+    })).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      diagnostic: {
+        status: 502,
+        category: 'upstream',
+        phase: '图片生成请求',
+        requestId: 'req_502',
+      },
     })
   })
 })

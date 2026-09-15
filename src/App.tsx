@@ -21,10 +21,16 @@ import ImageContextMenu from './components/ImageContextMenu'
 import SupportPromptModal from './components/SupportPromptModal'
 import { FavoriteCollectionPickerModal, FavoriteCollectionsView, ManageCollectionsModal } from './components/FavoriteCollections'
 import { useGlobalClickSuppression } from './lib/clickSuppression'
+import { isNasAuthEnabled } from './lib/nasAuth'
+import NasAuthGate from './components/NasAuthGate'
 
 let defaultConfigImportStarted = false
 
 export default function App() {
+  return isNasAuthEnabled() ? <NasAuthGate><Workspace /></NasAuthGate> : <Workspace />
+}
+
+function Workspace() {
   const appMode = useStore((s) => s.appMode)
   const filterFavorite = useStore((s) => s.filterFavorite)
   const activeFavoriteCollectionId = useStore((s) => s.activeFavoriteCollectionId)
@@ -32,6 +38,7 @@ export default function App() {
   useGlobalClickSuppression()
 
   useEffect(() => {
+    if (isNasAuthEnabled()) return
     if (defaultConfigImportStarted) return
     defaultConfigImportStarted = true
 

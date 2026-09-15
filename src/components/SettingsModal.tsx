@@ -1121,6 +1121,7 @@ export default function SettingsModal() {
         className="relative z-10 w-full max-w-3xl rounded-3xl border border-white/50 bg-white/95 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10 flex h-[85vh] sm:h-[600px] flex-col overflow-hidden"
       >
         {/* Header */}
+        {isNasAuthEnabled() && <NasConfigStatus />}
         <div className="flex items-center justify-between shrink-0 p-5 border-b border-gray-100 dark:border-white/[0.08]">
           <h3 className="text-lg font-bold text-gray-800 dark:text-gray-100 flex items-center gap-2">
             <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2043,3 +2044,5 @@ export default function SettingsModal() {
     </div>
   )
 }
+import NasConfigStatus from './NasConfigStatus'
+import { isNasAuthEnabled } from '../lib/nasAuth'

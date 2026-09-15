@@ -1,11 +1,13 @@
-import type { AgentConversation, TaskRecord, StoredImage, StoredImageThumbnail } from '../types'
+import type { AgentConversation, TaskRecord, StoredAgentContextImage, StoredImage, StoredImageThumbnail } from '../types'
+import { ApiRequestError, sanitizeApiErrorText } from './requestError'
 
 const DB_NAME = 'gpt-image-playground'
-const DB_VERSION = 3
+const DB_VERSION = 4
 const STORE_TASKS = 'tasks'
 const STORE_IMAGES = 'images'
 const STORE_THUMBNAILS = 'thumbnails'
 const STORE_AGENT_CONVERSATIONS = 'agentConversations'
+const STORE_AGENT_CONTEXT_IMAGES = 'agentContextImages'
 const THUMBNAIL_MAX_SIZE = 720
 const THUMBNAIL_QUALITY = 0.9
 const THUMBNAIL_VERSION = 2
@@ -29,8 +31,14 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_AGENT_CONVERSATIONS)) {
         db.createObjectStore(STORE_AGENT_CONVERSATIONS, { keyPath: 'id' })
       }
+      if (!db.objectStoreNames.contains(STORE_AGENT_CONTEXT_IMAGES)) {
+        db.createObjectStore(STORE_AGENT_CONTEXT_IMAGES, { keyPath: 'id' })
+      }
     }
-    req.onsuccess = () => resolve(req.result)
+    req.onsuccess = () => {
+      req.result.onversionchange = () => req.result.close()
+      resolve(req.result)
+    }
     req.onerror = () => reject(req.error)
   })
 }
@@ -43,11 +51,36 @@ function dbTransaction<T>(
   return openDB().then(
     (db) =>
       new Promise((resolve, reject) => {
+        let result: T | undefined
+        let reqError: DOMException | null = null
         const tx = db.transaction(storeName, mode)
         const store = tx.objectStore(storeName)
-        const req = fn(store)
-        req.onsuccess = () => resolve(req.result)
-        req.onerror = () => reject(req.error)
+        try {
+          const req = fn(store)
+          req.onsuccess = () => {
+            result = req.result
+          }
+          req.onerror = () => {
+            reqError = req.error
+          }
+        } catch (err) {
+          tx.abort()
+          db.close()
+          reject(err)
+          return
+        }
+        tx.oncomplete = () => {
+          db.close()
+          resolve(result as T)
+        }
+        tx.onerror = () => {
+          db.close()
+          reject(reqError ?? tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(reqError ?? tx.error)
+        }
       }),
   )
 }
@@ -76,9 +109,18 @@ export function commitTaskDeletion(deletedTaskIds: string[], updatedTasks: TaskR
         for (const id of deletedTaskIds) taskStore.delete(id)
         for (const task of updatedTasks) taskStore.put(task)
         for (const conversation of updatedConversations) conversationStore.put(conversation)
-        tx.oncomplete = () => resolve(undefined)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error)
+        tx.oncomplete = () => {
+          db.close()
+          resolve(undefined)
+        }
+        tx.onerror = () => {
+          db.close()
+          reject(tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(tx.error)
+        }
       }),
   )
 }
@@ -109,9 +151,18 @@ export function replaceAgentConversations(conversations: AgentConversation[]): P
         const store = tx.objectStore(STORE_AGENT_CONVERSATIONS)
         store.clear()
         for (const conversation of conversations) store.put(conversation)
-        tx.oncomplete = () => resolve(undefined)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error)
+        tx.oncomplete = () => {
+          db.close()
+          resolve(undefined)
+        }
+        tx.onerror = () => {
+          db.close()
+          reject(tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(tx.error)
+        }
       }),
   )
 }
@@ -120,6 +171,10 @@ export function replaceAgentConversations(conversations: AgentConversation[]): P
 
 export function getImage(id: string): Promise<StoredImage | undefined> {
   return dbTransaction(STORE_IMAGES, 'readonly', (s) => s.get(id))
+}
+
+export function getAgentContextImage(id: string): Promise<StoredAgentContextImage | undefined> {
+  return dbTransaction(STORE_AGENT_CONTEXT_IMAGES, 'readonly', (s) => s.get(id))
 }
 
 export function getStoredImageThumbnail(id: string): Promise<StoredImageThumbnail | undefined> {
@@ -190,18 +245,60 @@ export function getAllImageIds(): Promise<string[]> {
 }
 
 export function putImage(image: StoredImage): Promise<IDBValidKey> {
-  return dbTransaction(STORE_IMAGES, 'readwrite', (s) => s.put(image))
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        let result: IDBValidKey | undefined
+        const tx = db.transaction([STORE_IMAGES, STORE_AGENT_CONTEXT_IMAGES], 'readwrite')
+        const imageStore = tx.objectStore(STORE_IMAGES)
+        const agentContextImageStore = tx.objectStore(STORE_AGENT_CONTEXT_IMAGES)
+        const existingReq = imageStore.get(image.id)
+        existingReq.onsuccess = () => {
+          const existing = existingReq.result as StoredImage | undefined
+          const putReq = imageStore.put(image)
+          putReq.onsuccess = () => {
+            result = putReq.result
+          }
+          if (existing && existing.dataUrl !== image.dataUrl) {
+            agentContextImageStore.delete(image.id)
+          }
+        }
+        tx.oncomplete = () => {
+          db.close()
+          resolve(result as IDBValidKey)
+        }
+        tx.onerror = () => {
+          db.close()
+          reject(tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(tx.error)
+        }
+      }),
+  )
 }
 
 export function deleteImage(id: string): Promise<undefined> {
   return openDB().then(
     (db) =>
       new Promise((resolve, reject) => {
-        const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS], 'readwrite')
+        const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS, STORE_AGENT_CONTEXT_IMAGES], 'readwrite')
         tx.objectStore(STORE_IMAGES).delete(id)
         tx.objectStore(STORE_THUMBNAILS).delete(id)
-        tx.oncomplete = () => resolve(undefined)
-        tx.onerror = () => reject(tx.error)
+        tx.objectStore(STORE_AGENT_CONTEXT_IMAGES).delete(id)
+        tx.oncomplete = () => {
+          db.close()
+          resolve(undefined)
+        }
+        tx.onerror = () => {
+          db.close()
+          reject(tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(tx.error)
+        }
       }),
   )
 }
@@ -210,11 +307,55 @@ export function clearImages(): Promise<undefined> {
   return openDB().then(
     (db) =>
       new Promise((resolve, reject) => {
-        const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS], 'readwrite')
+        const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS, STORE_AGENT_CONTEXT_IMAGES], 'readwrite')
         tx.objectStore(STORE_IMAGES).clear()
         tx.objectStore(STORE_THUMBNAILS).clear()
-        tx.oncomplete = () => resolve(undefined)
-        tx.onerror = () => reject(tx.error)
+        tx.objectStore(STORE_AGENT_CONTEXT_IMAGES).clear()
+        tx.oncomplete = () => {
+          db.close()
+          resolve(undefined)
+        }
+        tx.onerror = () => {
+          db.close()
+          reject(tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(tx.error)
+        }
+      }),
+  )
+}
+
+export function putAgentContextImageIfSourceMatches(record: StoredAgentContextImage, sourceDataUrl: string): Promise<boolean> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        let saved = false
+        const tx = db.transaction([STORE_IMAGES, STORE_AGENT_CONTEXT_IMAGES], 'readwrite')
+        const imageStore = tx.objectStore(STORE_IMAGES)
+        const agentContextImageStore = tx.objectStore(STORE_AGENT_CONTEXT_IMAGES)
+        const sourceReq = imageStore.get(record.id)
+        sourceReq.onsuccess = () => {
+          const source = sourceReq.result as StoredImage | undefined
+          if (!source || source.dataUrl !== sourceDataUrl) return
+          const putReq = agentContextImageStore.put(record)
+          putReq.onsuccess = () => {
+            saved = true
+          }
+        }
+        tx.oncomplete = () => {
+          db.close()
+          resolve(saved)
+        }
+        tx.onerror = () => {
+          db.close()
+          reject(tx.error)
+        }
+        tx.onabort = () => {
+          db.close()
+          reject(tx.error)
+        }
       }),
   )
 }
@@ -263,6 +404,19 @@ export async function storeImage(dataUrl: string, source: NonNullable<StoredImag
 }
 
 export async function storeImageWithSize(dataUrl: string, source: NonNullable<StoredImage['source']> = 'upload'): Promise<StoreImageResult> {
+  try {
+    return await persistImageWithSize(dataUrl, source)
+  } catch (error) {
+    throw new ApiRequestError({
+      status: 0, statusText: '', category: 'local_storage', summary: '图片本地保存失败',
+      action: '检查浏览器存储空间和站点权限；已有结果请先下载备份，避免直接重新生成。',
+      detail: sanitizeApiErrorText(error instanceof Error ? `${error.name}: ${error.message}` : String(error)),
+      phase: source === 'generated' ? '生成结果保存' : '参考图保存',
+    })
+  }
+}
+
+async function persistImageWithSize(dataUrl: string, source: NonNullable<StoredImage['source']>): Promise<StoreImageResult> {
   const id = await hashDataUrl(dataUrl)
   const existing = await getImage(id)
   if (!existing) {

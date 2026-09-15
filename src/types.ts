@@ -331,6 +331,12 @@ export interface StoredImageThumbnail {
   thumbnailVersion?: number
 }
 
+export interface StoredAgentContextImage {
+  id: string
+  dataUrl: string
+  version: number
+}
+
 // ===== API 响应 =====
 
 export interface ImageResponseItem {

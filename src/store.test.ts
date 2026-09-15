@@ -9,6 +9,8 @@ import { deleteAgentRoundFromConversation, getActiveAgentRounds, getAgentConvers
 import { cleanStaleAgentInputDrafts } from './lib/inputDraftState'
 import { normalizePersistedState } from './lib/persistedState'
 import { setPresetConfig } from './lib/presetConfig'
+import { clearNasConfig, saveNasSettings } from './lib/nasConfig'
+import { getTaskApiProfile } from './lib/taskRecovery'
 vi.mock('./lib/db', () => {
   const tasks = new Map<string, TaskRecord>()
   const images = new Map<string, StoredImage>()
@@ -18,6 +20,8 @@ vi.mock('./lib/db', () => {
 
   return {
     CURRENT_THUMBNAIL_VERSION: 2,
+    getAgentContextImage: async () => undefined,
+    putAgentContextImageIfSourceMatches: async () => true,
     getAllTasks: async () => [...tasks.values()],
     putTask: async (task: TaskRecord) => {
       tasks.set(task.id, task)
@@ -136,7 +140,7 @@ import { callImageApi } from './lib/api'
 import { callAgentResponsesApi, callBatchImageSingle } from './lib/agentApi'
 import { getFalQueuedImageResult } from './lib/falAiImageApi'
 import { removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, getTaskApiProfile, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, reuseConfig, stopAgentResponse, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
+import { clearData, clearFailedTasks, deleteFavoriteCollection, editOutputs, getErrorToastMessage, getPersistedState, importData, initStore, regenerateAgentAssistantMessage, removeMultipleTasks, removeTask, restoreExplicitPresetConfig, reuseConfig, retryTask, stopAgentResponse, stopAllActiveRequests, submitAgentMessage, submitTask, taskMatchesFilterStatus, taskMatchesSearchQuery, useStore } from './store'
 
 const commitTaskDeletionImplementation = vi.mocked(commitTaskDeletion).getMockImplementation()!
 const deleteDbImageImplementation = vi.mocked(deleteDbImage).getMockImplementation()!
@@ -201,6 +205,11 @@ function importFile(data: ExportData, files: Record<string, Uint8Array> = {}): F
   const zipped = zipSync({ ...files, 'manifest.json': strToU8(JSON.stringify(data)) })
   const buffer = zipped.buffer.slice(zipped.byteOffset, zipped.byteOffset + zipped.byteLength)
   return { name: 'backup.zip', size: zipped.byteLength, arrayBuffer: async () => buffer.slice(0) } as File
+}
+
+function latestConfirmDialog() {
+  const calls = vi.mocked(useStore.getState().setConfirmDialog).mock.calls
+  return calls[calls.length - 1]?.[0]
 }
 
 describe('data operation locking', () => {
@@ -5304,5 +5313,279 @@ describe('reused task API profile', () => {
       cancelText: '放弃提交',
     }))
     expect(state.showSettings).toBe(false)
+  })
+})
+
+describe('task retry API profile', () => {
+  const profileA = createDefaultOpenAIProfile({ id: 'profile-a', name: '配置 A', apiKey: 'key-a', model: 'model-a' })
+  const profileB = createDefaultOpenAIProfile({ id: 'profile-b', name: '配置 B', apiKey: 'key-b', model: 'model-b' })
+
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(callImageApi).mockResolvedValue({
+      images: ['data:image/png;base64,retry-output'],
+      actualParams: {},
+      actualParamsList: [{}],
+      revisedPrompts: [],
+    })
+    useStore.setState({
+      settings: normalizeSettings({
+        ...DEFAULT_SETTINGS,
+        profiles: [profileA, profileB],
+        activeProfileId: profileB.id,
+      }),
+      tasks: [],
+      showToast: vi.fn(),
+      setConfirmDialog: vi.fn(),
+    })
+  })
+
+  it('uses the original valid API profile after switching current profile', async () => {
+    await retryTask(task({
+      id: 'failed-task',
+      status: 'error',
+      error: '失败',
+      apiProfileId: profileA.id,
+      apiProfileName: profileA.name,
+      apiModel: profileA.model,
+    }))
+    expect(callImageApi).not.toHaveBeenCalled()
+    const confirm = latestConfirmDialog()
+    expect(confirm).toMatchObject({
+      title: '确认重试任务',
+      confirmText: '确认重试',
+    })
+    expect(confirm?.message).toContain('配置 A')
+    expect(confirm?.message).toContain('model-a')
+    expect(confirm?.action).toBeTypeOf('function')
+    confirm!.action!()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledOnce())
+
+    expect(vi.mocked(callImageApi).mock.calls[0][0].settings.activeProfileId).toBe(profileA.id)
+    expect(useStore.getState().tasks[0]).toMatchObject({
+      apiProfileId: profileA.id,
+      apiProfileName: profileA.name,
+      apiModel: profileA.model,
+    })
+  })
+
+  it('does not request when the original profile is missing until the user confirms current profile', async () => {
+    await retryTask(task({
+      id: 'missing-profile-task',
+      status: 'error',
+      error: '失败',
+      apiProfileId: 'missing-profile',
+      apiProfileName: '已删除配置',
+    }))
+
+    expect(callImageApi).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks).toEqual([])
+    expect(useStore.getState().setConfirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+      title: '找不到 API 配置',
+      confirmText: '使用当前配置重试',
+    }))
+  })
+
+  it('creates a new retry task only for failed output slots', async () => {
+    const sourceTask = task({
+      id: 'partial-task',
+      status: 'done',
+      outputImages: ['success-a', 'success-b'],
+      outputErrors: [
+        { requestIndex: 2, error: 'failed-a' },
+        { requestIndex: 3, error: 'failed-b' },
+      ],
+      params: { ...DEFAULT_PARAMS, n: 4 },
+      apiProfileId: profileA.id,
+      apiProfileName: profileA.name,
+    })
+    useStore.setState({ tasks: [sourceTask] })
+
+    await retryTask(sourceTask)
+    const confirm = latestConfirmDialog()
+    expect(confirm?.message).toContain('仅重试失败的 2 张')
+    expect(confirm?.action).toBeTypeOf('function')
+    confirm!.action!()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledOnce())
+
+    expect(useStore.getState().tasks[0].params.n).toBe(2)
+    expect(useStore.getState().tasks.find((item) => item.id === 'partial-task')?.outputImages).toEqual(['success-a', 'success-b'])
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('已新建重试任务，仅重试失败的 2 张，原任务成功结果保留', 'info')
+  })
+
+  it('asks before retrying legacy tasks without a saved profile id', async () => {
+    await retryTask(task({
+      id: 'legacy-task',
+      status: 'error',
+      error: '失败',
+      apiProfileId: undefined,
+      apiProfileName: undefined,
+    }))
+
+    expect(callImageApi).not.toHaveBeenCalled()
+    const confirm = latestConfirmDialog()
+    expect(confirm).toMatchObject({
+      title: '找不到 API 配置',
+      confirmText: '使用当前配置重试',
+    })
+    expect(confirm?.message).toContain('没有保存 API 配置 ID')
+    expect(confirm?.message).toContain('配置 B')
+  })
+
+  it('blocks retry while a task is recovering', async () => {
+    await retryTask(task({
+      id: 'recovering-task',
+      status: 'error',
+      error: '等待恢复',
+      falRecoverable: true,
+      apiProvider: 'fal',
+      apiProfileId: profileA.id,
+    }))
+
+    expect(callImageApi).not.toHaveBeenCalled()
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('任务正在恢复中，无法重复重试', 'info')
+  })
+})
+
+describe('NAS generation gates and stop', () => {
+  beforeEach(async () => {
+    await clearTasks()
+    await clearImages()
+    await clearAgentConversations()
+    clearNasConfig()
+    vi.unstubAllEnvs()
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(callAgentResponsesApi).mockClear()
+    vi.mocked(getFalQueuedImageResult).mockClear()
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [createDefaultOpenAIProfile({ id: 'openai-profile', apiKey: 'openai-key' })], activeProfileId: 'openai-profile' }),
+      prompt: 'prompt',
+      inputImages: [],
+      params: { ...DEFAULT_PARAMS },
+      tasks: [],
+      agentConversations: [],
+      showToast: vi.fn(),
+    })
+  })
+
+  afterEach(() => {
+    clearNasConfig()
+    vi.unstubAllEnvs()
+  })
+
+  it('waits for NAS configuration before submitting generation', async () => {
+    vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'true')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 409 })))
+    await expect(saveNasSettings(useStore.getState().settings)).rejects.toThrow('其他页面')
+
+    await submitTask()
+
+    expect(callImageApi).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks).toEqual([])
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('NAS 配置已被其他页面修改，请重新读取后再保存', 'error')
+  })
+
+  it('waits for NAS configuration before submitting an Agent round', async () => {
+    vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'true')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 409 })))
+    await expect(saveNasSettings(useStore.getState().settings)).rejects.toThrow('其他页面')
+
+    await submitAgentMessage()
+
+    expect(callAgentResponsesApi).not.toHaveBeenCalled()
+    expect(useStore.getState().agentConversations).toEqual([])
+    expect(useStore.getState().showToast).toHaveBeenCalledWith('NAS 配置已被其他页面修改，请重新读取后再保存', 'error')
+  })
+
+  it('marks NAS startup running and recoverable tasks interrupted without scheduling recovery', async () => {
+    vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'true')
+    const falTask = task({
+      id: 'fal-recoverable',
+      apiProvider: 'fal',
+      apiProfileId: 'fal-profile',
+      status: 'error',
+      error: '等待恢复',
+      falRequestId: 'request-id',
+      falEndpoint: 'endpoint',
+      falRecoverable: true,
+    })
+    await putDbTask(falTask)
+
+    await initStore()
+
+    expect(getFalQueuedImageResult).not.toHaveBeenCalled()
+    expect(useStore.getState().tasks[0]).toMatchObject({
+      status: 'error',
+      error: '请求中断',
+      falRecoverable: false,
+    })
+  })
+
+  it('stops active gallery requests and marks tasks stopped', async () => {
+    const request = deferred<Awaited<ReturnType<typeof callImageApi>>>()
+    vi.mocked(callImageApi).mockImplementationOnce(() => request.promise)
+
+    await submitTask()
+    await vi.waitFor(() => expect(callImageApi).toHaveBeenCalledOnce())
+    stopAllActiveRequests()
+
+    expect(useStore.getState().tasks[0]).toMatchObject({
+      status: 'error',
+      error: '已停止生成。',
+      falRecoverable: false,
+      customRecoverable: false,
+    })
+
+    request.resolve({
+      images: ['data:image/png;base64,late'],
+      actualParams: {},
+      actualParamsList: [{}],
+      revisedPrompts: [],
+    })
+    await request.promise
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(useStore.getState().tasks[0].outputImages).toEqual([])
+  })
+
+  it('ignores in-flight recovery results after stopping all active requests', async () => {
+    const recovery = deferred<Awaited<ReturnType<typeof getFalQueuedImageResult>>>()
+    vi.mocked(getFalQueuedImageResult).mockImplementationOnce(() => recovery.promise)
+    const falTask = task({
+      id: 'recovering-fal',
+      apiProvider: 'fal',
+      apiProfileId: 'fal-profile',
+      status: 'error',
+      error: '等待恢复',
+      falRequestId: 'request-id',
+      falEndpoint: 'endpoint',
+      falRecoverable: true,
+    })
+    const falProfile = createDefaultFalProfile({ id: 'fal-profile', apiKey: 'fal-key' })
+    useStore.setState({
+      settings: normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [falProfile], activeProfileId: falProfile.id }),
+    })
+    await putDbTask(falTask)
+
+    await initStore()
+    await vi.waitFor(() => expect(getFalQueuedImageResult).toHaveBeenCalledOnce())
+    stopAllActiveRequests()
+    recovery.resolve({
+      images: ['data:image/png;base64,late-recovery'],
+      actualParams: {},
+      actualParamsList: [{}],
+      revisedPrompts: [],
+    })
+    await recovery.promise
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(useStore.getState().tasks.find((item) => item.id === falTask.id)).toMatchObject({
+      status: 'error',
+      error: '已停止生成。',
+      falRecoverable: false,
+      outputImages: [],
+    })
+    expect(await getAllImageIds()).toEqual([])
   })
 })

@@ -5,7 +5,7 @@ import { useHintTooltip } from '../hooks/useHintTooltip'
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { suppressGlobalClicks } from '../lib/clickSuppression'
-import { ensureImageCached, getCachedImage } from '../lib/imageCache'
+import { ensureImageCached, ensureImageThumbnailCached, getCachedImage } from '../lib/imageCache'
 import ButtonTooltip from './input/buttonTooltip'
 import { EditIcon, RefreshIcon } from './icons'
 
@@ -17,6 +17,7 @@ const DOUBLE_TAP_DELAY = 350
 const DOUBLE_TAP_DISTANCE = 40
 
 type TouchIntent = 'none' | 'horizontal-swipe' | 'vertical-move' | 'zoom-pan' | 'pinch'
+type ImageLoadState = 'idle' | 'loading' | 'loaded' | 'missing' | 'error'
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v))
@@ -36,38 +37,71 @@ export default function Lightbox() {
   const replaceImageTargetRef = useRef<string | null>(null)
 
   const [src, setSrc] = useState('')
+  const [srcImageId, setSrcImageId] = useState('')
+  const [previewSrc, setPreviewSrc] = useState('')
+  const [previewImageId, setPreviewImageId] = useState('')
+  const [imageLoadState, setImageLoadState] = useState<ImageLoadState>('idle')
+  const [retrySeq, setRetrySeq] = useState(0)
   const [maskImageSrc, setMaskImageSrc] = useState('')
   const [maskPreviewSrc, setMaskPreviewSrc] = useState('')
+  const loadSeqRef = useRef(0)
 
   const close = useCallback(() => setLightboxImageId(null), [setLightboxImageId])
   useCloseOnEscape(Boolean(lightboxImageId), close)
   usePreventBackgroundScroll(Boolean(lightboxImageId))
 
-  // 图片加载
+  // 图片读取可能比交互慢，所有回写都要确认仍是当前图片。
   useEffect(() => {
-    let cancelled = false
+    const seq = ++loadSeqRef.current
 
     if (!lightboxImageId) {
       setSrc('')
+      setSrcImageId('')
+      setPreviewSrc('')
+      setPreviewImageId('')
+      setImageLoadState('idle')
       return
     }
 
     setSrc('')
+    setSrcImageId('')
+    setPreviewSrc('')
+    setPreviewImageId('')
+    setImageLoadState('loading')
 
     const imageId = lightboxImageId
     const cached = getCachedImage(imageId)
     if (cached) {
       setSrc(cached)
+      setSrcImageId(imageId)
+      setImageLoadState('loaded')
     } else {
-      ensureImageCached(imageId).then((url) => {
-        if (!cancelled && url) setSrc(url)
-      })
+      ensureImageThumbnailCached(imageId)
+        .then((thumbnail) => {
+          if (loadSeqRef.current === seq && thumbnail?.dataUrl) {
+            setPreviewSrc(thumbnail.dataUrl)
+            setPreviewImageId(imageId)
+          }
+        })
+        .catch(() => {
+          // 缩略图只是占位，失败时继续等待原图读取结果。
+        })
+      ensureImageCached(imageId)
+        .then((url) => {
+          if (loadSeqRef.current !== seq) return
+          if (url) {
+            setSrc(url)
+            setSrcImageId(imageId)
+            setImageLoadState('loaded')
+            return
+          }
+          setImageLoadState('missing')
+        })
+        .catch(() => {
+          if (loadSeqRef.current === seq) setImageLoadState('error')
+        })
     }
-
-    return () => {
-      cancelled = true
-    }
-  }, [lightboxImageId])
+  }, [lightboxImageId, retrySeq])
 
   // 遮罩图加载
   useEffect(() => {
@@ -205,15 +239,22 @@ export default function Lightbox() {
     return () => window.removeEventListener('keydown', onKey)
   }, [lightboxImageId, showNav, goPrev, goNext])
 
-  if (!lightboxImageId || !src) return null
+  const currentSrc = srcImageId === lightboxImageId ? src : ''
+  const currentPreviewSrc = previewImageId === lightboxImageId ? previewSrc : ''
+
+  if (!lightboxImageId) return null
 
   return (
     <>
       <LightboxInner
-        src={src}
+        src={currentSrc}
+        previewSrc={currentPreviewSrc}
+        loadState={imageLoadState}
         imageId={lightboxImageId}
-        maskPreviewSrc={maskPreviewSrc}
+        maskPreviewSrc={currentSrc ? maskPreviewSrc : ''}
         onClose={close}
+        onRetry={() => setRetrySeq((seq) => seq + 1)}
+        onImageError={() => setImageLoadState('error')}
         showNav={showNav}
         currentIndex={currentIndex}
         total={total}
@@ -237,9 +278,13 @@ export default function Lightbox() {
 
 interface LightboxInnerProps {
   src: string
+  previewSrc: string
+  loadState: ImageLoadState
   imageId: string
   maskPreviewSrc?: string
   onClose: () => void
+  onRetry: () => void
+  onImageError: () => void
   showNav: boolean
   currentIndex: number
   total: number
@@ -252,7 +297,7 @@ interface LightboxInnerProps {
 }
 
 /** 内部组件：保证挂载时 DOM 已经存在，所有 ref / effect 都可靠 */
-function LightboxInner({ src, imageId, maskPreviewSrc, onClose, showNav, currentIndex, total, onPrev, onNext, showInputActions, editDisabled, onReplace, onEdit }: LightboxInnerProps) {
+function LightboxInner({ src, previewSrc, loadState, imageId, maskPreviewSrc, onClose, onRetry, onImageError, showNav, currentIndex, total, onPrev, onNext, showInputActions, editDisabled, onReplace, onEdit }: LightboxInnerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const openedAtRef = useRef(Date.now())
   const editHint = useHintTooltip({ enabled: () => editDisabled })
@@ -313,7 +358,7 @@ function LightboxInner({ src, imageId, maskPreviewSrc, onClose, showNav, current
     txRef.current = 0
     tyRef.current = 0
     rerender()
-  }, [src, rerender])
+  }, [imageId, rerender])
 
   useEffect(() => {
     const suppressClick = () => {
@@ -682,6 +727,21 @@ function LightboxInner({ src, imageId, maskPreviewSrc, onClose, showNav, current
   const isZoomed = s > 1
   const isDragging = dragRef.current.active || pinchRef.current.active
   const zoomPercent = Math.round(s * 100)
+  const visibleSrc = src || previewSrc
+  const showImage = Boolean(visibleSrc)
+  const showStatus = loadState !== 'loaded'
+  const statusTitle = loadState === 'missing'
+    ? '图片不存在'
+    : loadState === 'error'
+      ? '图片读取失败'
+      : '正在读取图片'
+  const statusText = loadState === 'missing'
+    ? '这张图片可能已经被删除，仍可切换到上一张或下一张。'
+    : loadState === 'error'
+      ? '读取原图时出错，可以重试或先查看其他图片。'
+      : previewSrc
+        ? '正在加载原图，当前先显示缩略图。'
+        : '正在从浏览器存储中读取原图。'
 
   const navBtnClass =
     'absolute top-1/2 -translate-y-1/2 p-2 rounded-full bg-white/80 text-gray-800 hover:bg-white dark:bg-black/40 dark:text-white dark:hover:bg-black/60 transition-all z-10 backdrop-blur-sm shadow-md border border-gray-200/50 dark:border-transparent'
@@ -705,22 +765,60 @@ function LightboxInner({ src, imageId, maskPreviewSrc, onClose, showNav, current
             willChange: 'transform',
           }}
         >
-          <img
-            src={src}
-            data-image-id={imageId}
-            className="saveable-image max-w-[90vw] max-h-[70vh] sm:max-w-[85vw] sm:max-h-[75vh] object-contain rounded-lg shadow-2xl"
-            onDragStart={(e) => e.preventDefault()}
-            alt=""
-          />
-          {maskPreviewSrc && (
-            <img
-              src={maskPreviewSrc}
-              className="absolute inset-0 w-full h-full object-contain rounded-lg pointer-events-none"
-              alt=""
-            />
+          {showImage ? (
+            <>
+              <img
+                src={visibleSrc}
+                data-image-id={imageId}
+                className="saveable-image max-w-[90vw] max-h-[70vh] sm:max-w-[85vw] sm:max-h-[75vh] object-contain rounded-lg shadow-2xl"
+                onDragStart={(e) => e.preventDefault()}
+                onError={src ? onImageError : undefined}
+                alt=""
+              />
+              {maskPreviewSrc && src && (
+                <img
+                  src={maskPreviewSrc}
+                  className="absolute inset-0 w-full h-full object-contain rounded-lg pointer-events-none"
+                  alt=""
+                />
+              )}
+            </>
+          ) : (
+            <div className="flex h-[52vh] w-[78vw] max-w-3xl items-center justify-center rounded-lg border border-white/20 bg-white/80 p-6 text-center shadow-2xl backdrop-blur-xl dark:bg-black/55">
+              <div>
+                <div className="mx-auto mb-4 h-10 w-10 animate-pulse rounded-full bg-gray-300 dark:bg-white/20" />
+                <div className="text-base font-medium text-gray-900 dark:text-white">{statusTitle}</div>
+                <div className="mt-2 text-sm text-gray-600 dark:text-white/65">{statusText}</div>
+                {(loadState === 'missing' || loadState === 'error') && (
+                  <button
+                    type="button"
+                    className="mt-5 rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white shadow-md transition hover:bg-blue-600 active:scale-95"
+                    onClick={(e) => { e.stopPropagation(); onRetry() }}
+                  >
+                    重试
+                  </button>
+                )}
+              </div>
+            </div>
           )}
         </div>
       </div>
+
+      {showStatus && showImage && (
+        <div className="absolute bottom-24 left-1/2 z-10 -translate-x-1/2 rounded-2xl border border-gray-200/80 bg-white/90 px-4 py-3 text-center shadow-xl backdrop-blur-xl dark:border-white/15 dark:bg-black/60">
+          <div className="text-sm font-medium text-gray-900 dark:text-white">{statusTitle}</div>
+          <div className="mt-1 text-xs text-gray-600 dark:text-white/65">{statusText}</div>
+          {(loadState === 'missing' || loadState === 'error') && (
+            <button
+              type="button"
+              className="mt-3 rounded-xl bg-blue-500 px-3 py-1.5 text-xs font-medium text-white shadow-md transition hover:bg-blue-600 active:scale-95"
+              onClick={(e) => { e.stopPropagation(); onRetry() }}
+            >
+              重试
+            </button>
+          )}
+        </div>
+      )}
 
       {/* 左右切换按钮 */}
       {showNav && !isZoomed && (

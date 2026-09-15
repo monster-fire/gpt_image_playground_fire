@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "deploy:cf": "npm run build && wrangler deploy",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "vitest run src && node --test server/app.test.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

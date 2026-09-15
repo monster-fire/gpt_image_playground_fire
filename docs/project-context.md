@@ -7,7 +7,9 @@
 - 依据：本地源码、类型、测试用例、部署配置和现有文档；未访问真实供应商。
 - 更新原则：相关模块变更后同步修正本文，以当前源码和实际验证结果为准。优先通过符号名定位，避免依赖易变化的行号。
 
-后续改造计划见 [NAS 登录、配置与图片收藏执行文档](nas-auth-execution-plan.md)：API 配置由后端接口直接读写 NAS 的 `config/gpt-image-playground.json`，收藏原图及提示词上传 NAS；普通画廊、历史和 Agent 对话保存在浏览器。其中描述的是拟实施方案，当前源码仍以本文记录的浏览器本地存储为主。
+改造状态见 [NAS 登录、配置与图片收藏执行文档](nas-auth-execution-plan.md)：Docker 模式已实现密码登录、固定 7 天会话和 NAS 配置文件接口；普通画廊、历史和 Agent 对话保存在浏览器。收藏上传 NAS 仍待实施。
+
+2026-09-15 P0 更新：`NasAuthGate` 在加载工作区前验证会话和配置；`nasAuth.ts` 区分 NAS Cookie 与供应商 Key，`nasConfig.ts` 管理 NAS 读写及版本冲突。`server/app.mjs` 使用 Node 内置模块，Docker 同时运行 Node 与 Nginx。重试采用原任务当前有效配置并确认范围，错误诊断分类脱敏，灯箱立即显示加载/缺失/失败状态，NAS 刷新不自动恢复生成。测试与部署参数见 [产品体验文档](product-experience-improvement-plan.md#6-本次交付边界)。下文保留原始结构梳理，涉及这些模块时以本段及当前源码为准。
 
 ## 1. 快速认识
 
@@ -135,11 +137,14 @@ Agent 图片任务通过 `agentConversationId`、`agentRoundId`、`agentMessageI
 | --- | --- |
 | 内存状态 | Zustand `useStore`；包括 UI 状态、任务列表、草稿、对话。 |
 | localStorage | Zustand 默认 `persist` 存储；key 为 `gpt-image-playground`，版本为 `2`。设置、收藏夹、模式和按选项保存的输入草稿等由 `createPersistedState` 挑选。 |
-| IndexedDB | [db.ts](../src/lib/db.ts)：数据库 `gpt-image-playground`，`DB_VERSION = 3`，object stores 为 `tasks`、`images`、`thumbnails`、`agentConversations`。 |
+| IndexedDB | [db.ts](../src/lib/db.ts)：数据库 `gpt-image-playground`，`DB_VERSION = 4`，object stores 为 `tasks`、`images`、`thumbnails`、`agentConversations`、`agentContextImages`。 |
 | 图片缓存 | [imageCache.ts](../src/lib/imageCache.ts)：原图/缩略图内存缓存、缩略图订阅及补全队列。 |
 | 数据清洗与迁移 | [persistedState.ts](../src/lib/persistedState.ts)、[inputDraftState.ts](../src/lib/inputDraftState.ts)、各领域的 `normalize*`。 |
 
 - 原图作为 data URL 存入 IndexedDB。ID 优先用 data URL 的 SHA-256；无 `crypto.subtle` 时有回退 hash。去重与缩略图生成是两件事，不应描述为原图统一压缩。
+- 混合模式 Agent 通过 `agentContextImages.ts` 按需压缩上下文图片，并按原图 ID 和压缩版本缓存到 `agentContextImages`。首次发送补齐本次缺失副本；后续轮次和刷新后直接复用，仅新增或过期图片需要处理。查看、下载和图片编辑仍读取原图，副本不进入备份或 NAS 上传。
+- `deleteImage` 和 `clearImages` 在同一事务清理原图、缩略图与 Agent 副本。写副本时在同一事务检查原图仍存在且内容匹配，防止删除/替换期间的延迟写入留下孤立缓存；同 ID 原图内容替换会失效副本，元数据更新则保留。调整压缩规则时递增 `CONTEXT_IMAGE_VERSION`。
+- `node scripts/test-agent-context-cache.mjs` 使用独立无头 Chrome 测试 IndexedDB 升级、刷新复用、增量压缩、删除/清空、并发删除与延迟写入；默认 Windows Chrome 路径，其他环境可设置 `CHROME_PATH`。不调用模型，也不访问日常浏览器数据。
 - 缩略图独立保存，当前版本 `2`，最长边 `720`，WebP 质量 `0.9`。缓存当前限制原图 `8` 项、缩略图 `80` 项，补全并发 `4`。
 - 任务主要通过图片 ID 引用图片；输入 UI 使用 `InputImage { id, dataUrl }`。持久化草稿时会去掉图片 data URL，恢复时再按 ID 读取。
 - Agent 对话通过 store 订阅写入 IndexedDB；`initStore` 支持将旧 localStorage 对话迁入，并清理旧持久化内容中的大响应数据。

@@ -1,0 +1,20 @@
+services:
+  gpt-image-playground:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "${PORT:-11130}:80"
+    environment:
+      APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD must be set}
+      APP_ORIGIN: ${APP_ORIGIN:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      API_PROXY_URL: ${API_PROXY_URL:-https://api.openai.com/v1}
+      ENABLE_API_PROXY: ${ENABLE_API_PROXY:-true}
+      LOCK_API_PROXY: ${LOCK_API_PROXY:-false}
+      API_CONFIG_PATH: /config/gpt-image-playground.json
+      DATA_DIR: /data
+    volumes:
+      - ./config:/config
+      - ./data:/data
+    restart: unless-stopped

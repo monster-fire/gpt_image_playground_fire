@@ -1,7 +1,8 @@
 import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
-import { appendStreamingFormatHint, getApiErrorMessage, getResponsesImageResultBase64, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
+import { appendStreamingFormatHint, getApiError, getApiErrorMessage, getNetworkApiError, getResponsesImageResultBase64, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX, sanitizeRawApiPayload, type ApiErrorContext } from './imageApiShared'
 import { getImageGenerationModel } from './imageModels'
+import { providerFetch } from './nasAuth'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 import { isEventStreamResponse, readJsonServerSentEvents, throwIfAborted } from './serverSentEvents'
 
@@ -24,6 +25,51 @@ export interface AgentApiResult {
   images: AgentApiResultImage[]
   outputItems: ResponsesApiResponse['output']
   rawResponsePayload?: string
+}
+
+function getRawResponsePayload(value: unknown): string {
+  return sanitizeRawApiPayload(JSON.stringify(value, null, 2))
+}
+
+function createRequestController(profile: ApiProfile, signal?: AbortSignal) {
+  const controller = new AbortController()
+  let timedOut = false
+  const timeoutMs = profile.timeout * 1000
+  const timeoutId = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  const abortFromCaller = () => controller.abort()
+  if (signal?.aborted) controller.abort()
+  signal?.addEventListener('abort', abortFromCaller, { once: true })
+  return {
+    controller,
+    timeoutMs,
+    getTimedOut: () => timedOut,
+    cleanup: () => {
+      clearTimeout(timeoutId)
+      signal?.removeEventListener('abort', abortFromCaller)
+    },
+  }
+}
+
+async function fetchWithNetworkDiagnostics(
+  url: string,
+  init: RequestInit,
+  context: ApiErrorContext,
+  request: ReturnType<typeof createRequestController>,
+): Promise<Response> {
+  try {
+    return await providerFetch(url, init)
+  } catch (err) {
+    if (err instanceof TypeError || (typeof DOMException !== 'undefined' && err instanceof DOMException && err.name === 'AbortError')) {
+      throw getNetworkApiError(err, {
+        ...context,
+        timeoutMs: request.getTimedOut() ? request.timeoutMs : undefined,
+      })
+    }
+    throw err
+  }
 }
 
 const AGENT_IMAGE_INSTRUCTIONS = [
@@ -586,7 +632,7 @@ async function parseAgentStreamResponse(
     text,
     images: extractImages(payload, mime),
     outputItems: payload.output ?? [],
-    rawResponsePayload: JSON.stringify(payload, null, 2),
+    rawResponsePayload: getRawResponsePayload(payload),
   }
 }
 
@@ -609,11 +655,8 @@ export async function callAgentResponsesApi(opts: {
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
-  const abortFromCaller = () => controller.abort()
-  if (signal?.aborted) controller.abort()
-  signal?.addEventListener('abort', abortFromCaller, { once: true })
+  const request = createRequestController(profile, signal)
+  const controller = request.controller
 
   try {
     const body: Record<string, unknown> = {
@@ -627,17 +670,33 @@ export async function callAgentResponsesApi(opts: {
       body.stream = true
     }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const requestBody = JSON.stringify(body)
+    const requestBytes = new Blob([requestBody]).size
+    // 混合模式的预算覆盖初始请求和工具执行后的续请求，不代表供应商硬限制。
+    if (settings.agentApiConfigMode === 'hybrid' && requestBytes > 20 * 1024 * 1024) {
+      throw new Error(`Agent 上下文过大（${(requestBytes / 1024 / 1024).toFixed(1)} MiB），超过 20 MiB 请求预算，请减少参考图片或新建对话`)
+    }
+    const startedAt = Date.now()
+    const response = await fetchWithNetworkDiagnostics(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
       headers: createHeaders(profile),
       cache: 'no-store',
-      body: JSON.stringify(body),
+      body: requestBody,
       signal: controller.signal,
-    })
+    }, {
+      phase: 'Agent 标题请求',
+      requestBytes,
+      elapsedMs: Date.now() - startedAt,
+    }, request)
 
     if (!response.ok) {
-      const errorMessage = await getApiErrorMessage(response)
-      throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
+      const err = await getApiError(response, {
+        phase: 'Agent Responses 请求',
+        requestBytes,
+        elapsedMs: Date.now() - startedAt,
+      })
+      err.message = maybeAppendStreamingHint(err.message, response.status, profile.streamImages)
+      throw err
     }
 
     if (profile.streamImages && isEventStreamResponse(response)) {
@@ -653,11 +712,10 @@ export async function callAgentResponsesApi(opts: {
       text: extractText(payload),
       images: extractImages(payload, mime),
       outputItems: payload.output,
-      rawResponsePayload: JSON.stringify(payload, null, 2),
+      rawResponsePayload: getRawResponsePayload(payload),
     }
   } finally {
-    clearTimeout(timeoutId)
-    signal?.removeEventListener('abort', abortFromCaller)
+    request.cleanup()
   }
 }
 
@@ -671,11 +729,8 @@ export async function callAgentConversationTitleApi(opts: {
   const { settings, profile, prompt, imageDataUrls, signal } = opts
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
-  const abortFromCaller = () => controller.abort()
-  if (signal?.aborted) controller.abort()
-  signal?.addEventListener('abort', abortFromCaller, { once: true })
+  const request = createRequestController(profile, signal)
+  const controller = request.controller
 
   try {
     const content: Array<Record<string, string>> = [
@@ -692,24 +747,34 @@ export async function callAgentConversationTitleApi(opts: {
     }
     if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const requestBody = JSON.stringify(body)
+    const startedAt = Date.now()
+    const requestBytes = new Blob([requestBody]).size
+    const response = await fetchWithNetworkDiagnostics(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
       headers: createHeaders(profile),
       cache: 'no-store',
-      body: JSON.stringify(body),
+      body: requestBody,
       signal: controller.signal,
-    })
+    }, {
+      phase: 'Agent Responses 请求',
+      requestBytes,
+      elapsedMs: Date.now() - startedAt,
+    }, request)
 
     if (!response.ok) {
-      throw new Error(await getApiErrorMessage(response))
+      throw await getApiError(response, {
+        phase: 'Agent 标题请求',
+        requestBytes: new Blob([requestBody]).size,
+        elapsedMs: Date.now() - startedAt,
+      })
     }
 
     const payload = normalizeResponsePayload(await response.json())
     if (!payload) throw new Error('Agent 标题接口返回格式无效')
     return parseAgentConversationTitleXml(extractText(payload))
   } finally {
-    clearTimeout(timeoutId)
-    signal?.removeEventListener('abort', abortFromCaller)
+    request.cleanup()
   }
 }
 
@@ -747,11 +812,8 @@ export async function callBatchImageSingle(opts: {
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
-  const abortFromCaller = () => controller.abort()
-  if (signal?.aborted) controller.abort()
-  signal?.addEventListener('abort', abortFromCaller, { once: true })
+  const request = createRequestController(profile, signal)
+  const controller = request.controller
 
   try {
     const referenceMapping = referenceImageDataUrls.length > 0
@@ -806,16 +868,27 @@ export async function callBatchImageSingle(opts: {
       body.stream = true
     }
 
-    const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
+    const requestBody = JSON.stringify(body)
+    const requestBytes = new Blob([requestBody]).size
+    const startedAt = Date.now()
+    const response = await fetchWithNetworkDiagnostics(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
       headers: createHeaders(profile),
       cache: 'no-store',
-      body: JSON.stringify(body),
+      body: requestBody,
       signal: controller.signal,
-    })
+    }, {
+      phase: 'Agent 批量图片请求',
+      requestBytes,
+      elapsedMs: Date.now() - startedAt,
+    }, request)
 
     if (!response.ok) {
-      const errorMsg = await getApiErrorMessage(response)
+      const errorMsg = await getApiErrorMessage(response, {
+        phase: 'Agent 批量图片请求',
+        requestBytes,
+        elapsedMs: Date.now() - startedAt,
+      })
       return { batchItemId, image: null, error: maybeAppendStreamingHint(errorMsg, response.status, profile.streamImages) }
     }
 
@@ -887,7 +960,7 @@ export async function callBatchImageSingle(opts: {
       batchItemId,
       image,
       error: image ? null : '接口未返回图片数据',
-      rawResponsePayload: JSON.stringify(payload, null, 2),
+      rawResponsePayload: getRawResponsePayload(payload),
     }
   } catch (err) {
     if (controller.signal.aborted || signal?.aborted) {
@@ -895,8 +968,7 @@ export async function callBatchImageSingle(opts: {
     }
     return { batchItemId, image: null, error: err instanceof Error ? err.message : String(err) }
   } finally {
-    clearTimeout(timeoutId)
-    signal?.removeEventListener('abort', abortFromCaller)
+    request.cleanup()
   }
 }
 

@@ -43,7 +43,9 @@ async function embedDefaultConfig(value: string) {
 
 export default defineConfig(async ({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const defaultApiUrl = await embedDefaultConfig(process.env.VITE_DEFAULT_API_URL ?? env.VITE_DEFAULT_API_URL ?? '')
+  const nasAuthEnabled = (process.env.VITE_NAS_AUTH_ENABLED ?? env.VITE_NAS_AUTH_ENABLED) === 'true'
+  const defaultApiUrl = nasAuthEnabled ? '' : await embedDefaultConfig(process.env.VITE_DEFAULT_API_URL ?? env.VITE_DEFAULT_API_URL ?? '')
+  if (nasAuthEnabled) process.env.VITE_DEFAULT_API_URL = ''
   if (defaultApiUrl.startsWith('embedded-config:')) process.env.VITE_DEFAULT_API_URL = defaultApiUrl
   const devProxyConfig = command === 'serve' ? loadDevProxyConfig() : null
 

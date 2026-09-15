@@ -1,4 +1,4 @@
-import { create } from 'zustand'
+﻿import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type {
   AgentConversation,
@@ -47,6 +47,7 @@ import {
 import { callImageApi } from './lib/api'
 import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments, type AgentApiResultImage } from './lib/agentApi'
 import { buildAgentApiInput, buildAgentContinuationInput } from './lib/agentInputBuilder'
+import { createAgentContextImageLoader } from './lib/agentContextImages'
 import { collectAgentRoundOutputImageSlots, extractAgentReferenceIds, getAgentCurrentReferenceId, getAgentGeneratedImageReferenceId } from './lib/agentImageReferences'
 import { showBrowserNotification } from './lib/browserNotification'
 import { IMAGE_FETCH_CORS_HINT } from './lib/imageApiShared'
@@ -68,6 +69,9 @@ import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, createDefa
 import { createPersistedState, mergePersistedAgentConversations, migratePersistedState, normalizePersistedState } from './lib/persistedState'
 import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveAgentImageActualParams, deriveGalleryActualParams, firstActualParams, hasActualParams, hasActualSizeParam, mapActualParamsByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks } from './lib/taskState'
 import { stripInjectedCodexCliSizePrompt } from './lib/size'
+import { createSettingsForApiProfile, getCurrentApiProfileName, getRecoveringTaskDetail, getRecoveringTaskLabel, getRetryApiProfile, getRetryParams, getTaskApiProfile, getTaskApiProfileName, isRecoveringTask, TASK_STOPPED_MESSAGE } from './lib/taskRecovery'
+import { isNasAuthEnabled } from './lib/nasAuth'
+import { waitForNasConfig } from './lib/nasConfig'
 
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
@@ -75,12 +79,14 @@ const SUPPORT_PROMPT_IMAGE_THRESHOLD = 50
 const falRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const customRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const openAIWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const taskControllers = new Map<string, AbortController>()
 const agentRoundControllers = new Map<string, AbortController>()
 const agentRecoveryContinuations = new Set<string>()
+const stoppedTaskIds = new Set<string>()
 const deletedActiveAgentTasks = new Map<string, { task: TaskRecord; controller: AbortController }>()
 let agentConversationPersistenceReady = false
 let agentConversationMigrationPending = false
-const AGENT_STOPPED_MESSAGE = '已停止生成。'
+const AGENT_STOPPED_MESSAGE = TASK_STOPPED_MESSAGE
 const AGENT_RECOVERY_PAUSE_ERROR = 'AgentRecoveryPauseError'
 const AGENT_CONVERSATION_TITLE_MAX_LENGTH = 28
 const ERROR_TOAST_MAX_LENGTH = 80
@@ -1181,28 +1187,6 @@ function getCustomRecoveryProfile(settings: AppSettings, task: TaskRecord) {
   return null
 }
 
-export function getTaskApiProfile(settings: AppSettings, task: TaskRecord): ApiProfile | null {
-  const normalized = normalizeSettings(settings)
-  if (!task.apiProfileId) return null
-  return normalized.profiles.find((profile) => profile.id === task.apiProfileId) ?? null
-}
-
-function createSettingsForApiProfile(settings: AppSettings, profile: ApiProfile): AppSettings {
-  const normalized = normalizeSettings(settings)
-  return normalizeSettings({
-    ...normalized,
-    baseUrl: profile.baseUrl,
-    apiKey: profile.apiKey,
-    model: profile.model,
-    timeout: profile.timeout,
-    apiMode: profile.apiMode,
-    codexCli: profile.codexCli,
-    apiProxy: profile.apiProxy,
-    profiles: normalized.profiles.map((item) => item.id === profile.id ? profile : item),
-    activeProfileId: profile.id,
-  })
-}
-
 function getAgentProfileValidationError(settings: AppSettings): { profile: ApiProfile | null; message: string } | null {
   const normalized = normalizeSettings(settings)
   const textProfile = getAgentTextApiProfile(normalized)
@@ -1225,10 +1209,6 @@ function getAgentProfileValidationError(settings: AppSettings): { profile: ApiPr
 function getReusedTaskApiProfile(settings: AppSettings, profileId: string | null): ApiProfile | null {
   if (!profileId) return null
   return normalizeSettings(settings).profiles.find((profile) => profile.id === profileId) ?? null
-}
-
-function getTaskApiProfileName(task: TaskRecord) {
-  return task.apiProfileName || task.apiModel || '未知配置'
 }
 
 function isNetworkRecoverableError(err: unknown) {
@@ -1274,7 +1254,7 @@ function getApiRequestNetworkErrorHint(
   }
 
   if (elapsedSeconds >= 110 && elapsedSeconds <= 140) {
-    return `提示：请求等待约 120 秒后被断开，这通常是 Cloudflare 等 CDN/网关的超时限制，而非接口本身报错。如果使用 Cloudflare，可考虑升级套餐或使用不经过 CDN 的直连地址。${getTimeoutStreamingHint(profile)}`
+    return `提示：请求等待约 120 秒后被断开，仅凭耗时无法判断原因。请检查代理日志、上游响应和超时配置。${getTimeoutStreamingHint(profile)}`
   }
 
   return `提示：请求等待较长时间后被断开，通常是反向代理或网关的超时限制，而非接口本身报错。可检查代理超时设置，或降低图片尺寸/质量后重试。${getTimeoutStreamingHint(profile)}`
@@ -1298,6 +1278,7 @@ function clearFalRecoveryTimer(taskId: string) {
 }
 
 function scheduleFalRecovery(taskId: string, delayMs = FAL_RECOVERY_POLL_MS) {
+  if (stoppedTaskIds.has(taskId)) return
   if (falRecoveryTimers.has(taskId)) return
   if (!useStore.getState().tasks.some((task) => task.id === taskId)) return
   const timer = setTimeout(() => {
@@ -1314,6 +1295,7 @@ function clearCustomRecoveryTimer(taskId: string) {
 }
 
 function scheduleCustomRecovery(taskId: string, delayMs = CUSTOM_RECOVERY_POLL_MS) {
+  if (stoppedTaskIds.has(taskId)) return
   if (customRecoveryTimers.has(taskId)) return
   if (!useStore.getState().tasks.some((task) => task.id === taskId)) return
   const timer = setTimeout(() => {
@@ -1375,6 +1357,7 @@ async function resolveImageSizeParamsList(
 }
 
 async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<ReturnType<typeof getFalQueuedImageResult>>) {
+  if (stoppedTaskIds.has(task.id)) return
   const latest = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.falRecoverable) return
@@ -1402,6 +1385,7 @@ async function completeRecoveredFalTask(task: TaskRecord, result: Awaited<Return
 }
 
 async function recoverFalTask(taskId: string) {
+  if (stoppedTaskIds.has(taskId)) return
   const { settings, tasks } = useStore.getState()
   const task = tasks.find((item) => item.id === taskId)
   if (!task || task.apiProvider !== 'fal' || !task.falRequestId || !task.falEndpoint || task.status === 'done') return
@@ -1472,7 +1456,24 @@ export async function initStore() {
   if (shouldRewritePersistedLocalState) {
     useStore.setState({})
   }
-  const { tasks: markedTasks, interruptedTasks } = markInterruptedOpenAIRunningTasks(storedTasks, Date.now())
+  const now = Date.now()
+  const { tasks: markedTasks, interruptedTasks } = isNasAuthEnabled()
+    ? storedTasks.reduce<{ tasks: TaskRecord[]; interruptedTasks: TaskRecord[] }>((acc, task) => {
+        if (task.status !== 'running' && !task.falRecoverable && !task.customRecoverable) {
+          acc.tasks.push(task)
+          return acc
+        }
+        const updated = {
+          ...task,
+          ...createTaskErrorPatch(task, '请求中断', now),
+          falRecoverable: false,
+          customRecoverable: false,
+        }
+        acc.tasks.push(updated)
+        acc.interruptedTasks.push(updated)
+        return acc
+      }, { tasks: [], interruptedTasks: [] })
+    : markInterruptedOpenAIRunningTasks(storedTasks, now)
   const interruptedTaskIds = new Set(interruptedTasks.map((task) => task.id))
   const favoriteState = useStore.getState()
   const normalizedFavorites = normalizeLoadedFavoriteState(markedTasks.map(getPersistableTask), favoriteState.favoriteCollections, favoriteState.defaultFavoriteCollectionId)
@@ -1488,20 +1489,22 @@ export async function initStore() {
     .map((task) => putTask(task)))
   useStore.getState().setTasks(tasks)
   showSupportPromptForExistingLocalData(tasks)
-  for (const task of tasks) {
-    if (
-      task.apiProvider === 'fal' &&
-      task.falRequestId &&
-      task.falEndpoint &&
-      (task.status === 'running' || task.falRecoverable)
-    ) {
-      scheduleFalRecovery(task.id, 0)
-    }
-    if (
-      task.customTaskId &&
-      (task.status === 'running' || task.customRecoverable)
-    ) {
-      scheduleCustomRecovery(task.id, 0)
+  if (!isNasAuthEnabled()) {
+    for (const task of tasks) {
+      if (
+        task.apiProvider === 'fal' &&
+        task.falRequestId &&
+        task.falEndpoint &&
+        (task.status === 'running' || task.falRecoverable)
+      ) {
+        scheduleFalRecovery(task.id, 0)
+      }
+      if (
+        task.customTaskId &&
+        (task.status === 'running' || task.customRecoverable)
+      ) {
+        scheduleCustomRecovery(task.id, 0)
+      }
     }
   }
 
@@ -1636,6 +1639,14 @@ export async function initStore() {
 
 /** 提交新任务 */
 export async function submitTask(options: { allowFullMask?: boolean; useCurrentApiProfileWhenReusedMissing?: boolean } = {}) {
+  if (isNasAuthEnabled()) {
+    try {
+      await waitForNasConfig()
+    } catch (err) {
+      useStore.getState().showToast(err instanceof Error ? err.message : String(err), 'error')
+      return
+    }
+  }
   const { settings, prompt, inputImages, maskDraft, params, reusedTaskApiProfileId, reusedTaskApiProfileName, reusedTaskApiProfileMissing, showToast, setConfirmDialog } =
     useStore.getState()
 
@@ -1727,6 +1738,7 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   }
 
   const taskId = genId()
+  stoppedTaskIds.delete(taskId)
   const task: TaskRecord = {
     id: taskId,
     prompt: prompt.trim(),
@@ -1822,6 +1834,7 @@ function markAgentRoundTasksStopped(conversationId: string, roundId: string, now
   for (const task of runningTasks) {
     clearFalRecoveryTimer(task.id)
     clearCustomRecoveryTimer(task.id)
+    stoppedTaskIds.add(task.id)
     updateTaskInStore(task.id, {
       ...createTaskErrorPatch(task, AGENT_STOPPED_MESSAGE, now),
       falRecoverable: false,
@@ -1977,6 +1990,58 @@ export function stopAgentResponse(conversationId = useStore.getState().activeAge
   markAgentRoundStopped(conversationId, runningRound.id)
   useStore.getState().showToast('已停止生成', 'info')
 }
+
+export function stopAllActiveRequests(now = Date.now()) {
+  for (const controller of taskControllers.values()) controller.abort()
+  taskControllers.clear()
+  for (const controller of agentRoundControllers.values()) controller.abort()
+  agentRoundControllers.clear()
+  for (const taskId of falRecoveryTimers.keys()) clearFalRecoveryTimer(taskId)
+  for (const taskId of customRecoveryTimers.keys()) clearCustomRecoveryTimer(taskId)
+  for (const taskId of openAIWatchdogTimers.keys()) clearOpenAIWatchdogTimer(taskId)
+  agentRecoveryContinuations.clear()
+
+  const stoppedTasks: TaskRecord[] = []
+  useStore.setState((state) => {
+    const streamPreviews = { ...state.streamPreviews }
+    const streamPreviewSlots = { ...state.streamPreviewSlots }
+    const tasks = state.tasks.map((task) => {
+      if (task.status !== 'running' && !task.falRecoverable && !task.customRecoverable) return task
+      delete streamPreviews[task.id]
+      delete streamPreviewSlots[task.id]
+      stoppedTaskIds.add(task.id)
+      const stopped = {
+        ...task,
+        ...createTaskErrorPatch(task, AGENT_STOPPED_MESSAGE, now),
+        falRecoverable: false,
+        customRecoverable: false,
+      }
+      stoppedTasks.push(stopped)
+      return stopped
+    })
+    const agentConversations = state.agentConversations.map((conversation) => ({
+      ...conversation,
+      rounds: conversation.rounds.map((round) =>
+        round.status === 'running'
+          ? { ...round, status: 'error' as const, error: AGENT_STOPPED_MESSAGE, finishedAt: now }
+          : round,
+      ),
+      messages: conversation.messages.map((message) =>
+        message.role === 'assistant' &&
+        conversation.rounds.some((round) => round.status === 'running' && round.assistantMessageId === message.id)
+          ? { ...message, content: appendAgentStoppedMessage(message.content) }
+          : message,
+      ),
+      updatedAt: conversation.rounds.some((round) => round.status === 'running') ? now : conversation.updatedAt,
+    }))
+    return { tasks, agentConversations, streamPreviews, streamPreviewSlots }
+  })
+
+  for (const task of stoppedTasks) void putTask(task)
+  void flushAgentConversationsToIndexedDB()
+}
+
+export const stopAllRequestsForLogout = stopAllActiveRequests
 
 function addAgentReferencedImageIds(target: Set<string>, conversations = useStore.getState().agentConversations, inputDrafts = useStore.getState().agentInputDrafts) {
   for (const conversation of conversations) {
@@ -2288,6 +2353,14 @@ async function continueRecoveredAgentRound(taskId: string) {
 }
 
 export async function submitAgentMessage() {
+  if (isNasAuthEnabled()) {
+    try {
+      await waitForNasConfig()
+    } catch (err) {
+      useStore.getState().showToast(err instanceof Error ? err.message : String(err), 'error')
+      return
+    }
+  }
   const state = useStore.getState()
   const { settings, prompt, inputImages, maskDraft, params, showToast } = state
   const normalizedSettings = normalizeSettings(settings)
@@ -2438,6 +2511,10 @@ export async function submitAgentMessage() {
 }
 
 export async function regenerateAgentAssistantMessage(conversationId: string, roundId: string) {
+  if (isNasAuthEnabled()) {
+    try { await waitForNasConfig() }
+    catch (error) { useStore.getState().showToast(error instanceof Error ? error.message : String(error), 'error'); return }
+  }
   const state = useStore.getState()
   const { settings, params, showToast } = state
   const normalizedSettings = normalizeSettings(settings)
@@ -2569,11 +2646,15 @@ async function executeAgentRound(
     const maskDataUrl = round.maskImageId ? await ensureImageCached(round.maskImageId) : undefined
     if (round.maskImageId && !maskDataUrl) throw new Error('遮罩图片已不存在')
 
+    const loadContextImage = requestSettings.agentApiConfigMode === 'hybrid'
+      ? createAgentContextImageLoader(ensureImageCached, controller.signal)
+      : ensureImageCached
+
     const apiInput = await buildAgentApiInput({
       conversation,
       currentRound: round,
       tasks: latestState.tasks,
-      loadImage: ensureImageCached,
+      loadImage: loadContextImage,
     })
     if (controller.signal.aborted) throw createAgentAbortError()
     const existingAssistantMessage = round.assistantMessageId
@@ -2789,7 +2870,7 @@ async function executeAgentRound(
         batchTaskIds: resume.recoveredTaskIds,
         toolCallsUsed,
         maxToolCalls,
-        loadImage: ensureImageCached,
+        loadImage: loadContextImage,
       })
     }
     let reachedToolLimit = resume ? toolCallsUsed >= maxToolCalls : false
@@ -3365,7 +3446,7 @@ async function executeAgentRound(
         batchTaskIds: streamingTaskIds,
         toolCallsUsed,
         maxToolCalls,
-        loadImage: ensureImageCached,
+        loadImage: loadContextImage,
       })
       accumulatedOutputItems = accumulatedOutputItemsWithFunctionOutputs
       pendingToolTextSeparator = true
@@ -3530,6 +3611,8 @@ async function executeTask(taskId: string) {
   let customTaskInfo: { taskId: string } | null = task.customTaskId
     ? { taskId: task.customTaskId }
     : null
+  const controller = new AbortController()
+  taskControllers.set(taskId, controller)
 
   if (
     taskProvider !== 'fal' &&
@@ -3564,6 +3647,7 @@ async function executeTask(taskId: string) {
       nativeTransparentBackground: task.params.transparent_output && !task.transparentOutput,
       inputImageDataUrls: inputDataUrls,
       maskDataUrl,
+      signal: controller.signal,
       skipCodexCliSizePrompt: task.sourceMode === 'agent',
       onFalRequestEnqueued: (request) => {
         falRequestInfo = request
@@ -3708,6 +3792,7 @@ async function executeTask(taskId: string) {
       useStore.getState().setDetailTaskId(taskId)
     }
   } finally {
+    if (taskControllers.get(taskId) === controller) taskControllers.delete(taskId)
     // 释放输入图片的内存缓存（已持久化到 IndexedDB，后续按需从 DB 加载）
     for (const imgId of task.inputImageIds) {
       deleteCachedImage(imgId)
@@ -3816,10 +3901,59 @@ export async function deleteFavoriteCollection(collectionId: string, deleteTasks
 }
 
 /** 重试失败的任务：创建新任务并执行 */
-export async function retryTask(task: TaskRecord) {
-  const { settings } = useStore.getState()
-  const activeProfile = getActiveApiProfile(settings)
-  const normalizedParams = normalizeParamsForSettings(task.params, settings, { hasInputImages: task.inputImageIds.length > 0 })
+export async function retryTask(task: TaskRecord, options: { confirmed?: boolean; useCurrentApiProfileWhenMissing?: boolean } = {}) {
+  if (isRecoveringTask(task)) {
+    useStore.getState().showToast('任务正在恢复中，无法重复重试', 'info')
+    return
+  }
+  if (isNasAuthEnabled()) {
+    try {
+      await waitForNasConfig()
+    } catch (err) {
+      useStore.getState().showToast(err instanceof Error ? err.message : String(err), 'error')
+      return
+    }
+  }
+  const { settings, setConfirmDialog } = useStore.getState()
+  const retryProfile = getRetryApiProfile(settings, task)
+  const activeProfile = retryProfile ?? getActiveApiProfile(settings)
+  if (!options.confirmed && retryProfile) {
+    const failedCount = task.outputErrors?.length ?? 0
+    const rangeText = failedCount > 0
+      ? `仅重试失败的 ${failedCount} 张，原任务成功结果保留。`
+      : `重新生成 ${Math.max(1, task.params.n || 1)} 张。`
+    setConfirmDialog({
+      title: '确认重试任务',
+      message: `本次会新建请求并使用原任务配置「${retryProfile.name}」。\n模型：${retryProfile.model || '未设置'}\n范围：${rangeText}`,
+      confirmText: '确认重试',
+      cancelText: '取消',
+      action: () => {
+        void retryTask(task, { confirmed: true })
+      },
+    })
+    return
+  }
+  if (!retryProfile && !options.useCurrentApiProfileWhenMissing) {
+    const taskProfileName = getTaskApiProfileName(task)
+    const missingReason = task.apiProfileId
+      ? `找不到原任务使用的 API 配置「${taskProfileName}」。`
+      : '这个历史任务没有保存 API 配置 ID，无法确认原任务配置。'
+    const failedCount = task.outputErrors?.length ?? 0
+    const rangeText = failedCount > 0
+      ? `仅重试失败的 ${failedCount} 张，原任务成功结果保留。`
+      : `重新生成 ${Math.max(1, task.params.n || 1)} 张。`
+    setConfirmDialog({
+      title: '找不到 API 配置',
+      message: `${missingReason}\n\n要改用当前 API 配置「${getCurrentApiProfileName(settings)}」新建重试任务吗？\n模型：${activeProfile.model || '未设置'}\n范围：${rangeText}`,
+      confirmText: '使用当前配置重试',
+      cancelText: '放弃重试',
+      action: () => {
+        void retryTask(task, { confirmed: true, useCurrentApiProfileWhenMissing: true })
+      },
+    })
+    return
+  }
+  const normalizedParams = getRetryParams(settings, activeProfile, task)
   const shouldUseTransparentOutput = (normalizedParams.output_format === 'png' || normalizedParams.output_format === 'webp') && normalizedParams.transparent_output
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)
@@ -3828,6 +3962,7 @@ export async function retryTask(task: TaskRecord) {
     ? createTransparentOutputMeta(task.prompt.trim())
     : null
   const taskId = genId()
+  stoppedTaskIds.delete(taskId)
   const newTask: TaskRecord = {
     id: taskId,
     prompt: task.prompt,
@@ -3854,6 +3989,10 @@ export async function retryTask(task: TaskRecord) {
   useStore.getState().setTasks([newTask, ...latestTasks])
   await putTask(newTask)
 
+  const failedCount = task.outputErrors?.length ?? 0
+  if (failedCount > 0) {
+    useStore.getState().showToast(`已新建重试任务，仅重试失败的 ${failedCount} 张，原任务成功结果保留`, 'info')
+  }
   executeTask(taskId)
 }
 
@@ -4120,6 +4259,7 @@ async function removeTasks(taskIds: string[], updateState?: TaskDeletionStateUpd
     clearFalRecoveryTimer(task.id)
     clearCustomRecoveryTimer(task.id)
     clearOpenAIWatchdogTimer(task.id)
+    stoppedTaskIds.delete(task.id)
   }
 
   const cleanup = scrubAgentOutputPayloadsForDeletedTasks(deletedTasks)
@@ -4234,6 +4374,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
 }
 
 async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<ReturnType<typeof getCustomQueuedImageResult>>) {
+  if (stoppedTaskIds.has(task.id)) return
   const latest = useStore.getState().tasks.find((item) => item.id === task.id)
   if (!latest || latest.status === 'done' || latest.error === AGENT_STOPPED_MESSAGE) return
   if (latest.status !== 'running' && !latest.customRecoverable) return
@@ -4261,6 +4402,7 @@ async function completeRecoveredCustomTask(task: TaskRecord, result: Awaited<Ret
 }
 
 async function recoverCustomTask(taskId: string) {
+  if (stoppedTaskIds.has(taskId)) return
   const { settings, tasks } = useStore.getState()
   const task = tasks.find((item) => item.id === taskId)
   if (!task || !task.customTaskId || task.status === 'done') return

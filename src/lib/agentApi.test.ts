@@ -40,6 +40,57 @@ describe('callAgentResponsesApi', () => {
     vi.restoreAllMocks()
   })
 
+  it('rejects oversized hybrid requests before sending, counting UTF-8 bytes', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+    const profile = createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses' })
+    await expect(callAgentResponsesApi({
+      settings: { ...DEFAULT_SETTINGS, agentApiConfigMode: 'hybrid' },
+      profile,
+      params: DEFAULT_PARAMS,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: '图'.repeat(7 * 1024 * 1024) }] }],
+    })).rejects.toThrow('超过 20 MiB 请求预算')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sends hybrid context within budget without changing image references', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ output: [] })))
+    const input = [{ role: 'user', content: [
+      { type: 'input_image', image_url: 'data:image/webp;base64,cHJldmlldw==' },
+      { type: 'input_text', text: '<ref id="round-1-image-1" />' },
+    ] }]
+    await callAgentResponsesApi({
+      settings: { ...DEFAULT_SETTINGS, agentApiConfigMode: 'hybrid' },
+      profile: createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses' }),
+      params: DEFAULT_PARAMS,
+      input,
+    })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).input).toEqual(input)
+  })
+
+  it('throws structured supplier auth diagnostics with request metrics', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'Incorrect API key provided: sk-agent-secret' },
+    }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json', 'x-request-id': 'req_agent_401' },
+    }))
+
+    await expect(callAgentResponsesApi({
+      settings: DEFAULT_SETTINGS,
+      profile: createDefaultOpenAIProfile({ apiKey: 'test-key', apiMode: 'responses' }),
+      params: DEFAULT_PARAMS,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'prompt' }] }],
+    })).rejects.toMatchObject({
+      name: 'ApiRequestError',
+      diagnostic: {
+        status: 401,
+        category: 'auth',
+        phase: 'Agent Responses 请求',
+        requestId: 'req_agent_401',
+      },
+    })
+  })
+
   it('streams Agent text and requests configured partial images', async () => {
     const streamBody = [
       'data: {"type":"response.output_text.delta","delta":"Hel"}',

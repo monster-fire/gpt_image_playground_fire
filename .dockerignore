@@ -5,3 +5,11 @@ dist
 *.md
 Dockerfile
 .dockerignore
+.omx
+.env
+.env.*
+config
+data
+*.zip
+*.log
+dev-proxy.config.json

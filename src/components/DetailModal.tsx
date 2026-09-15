@@ -13,6 +13,8 @@ import { downloadImageEntriesAsZip, downloadImageIds, getImageZipEntries } from 
 import { isAgentTaskPromptPending } from '../lib/taskPromptDisplay'
 import { replaceImageMentionsForApi } from '../lib/promptImageMentions'
 import { getApiProviderLabel } from '../lib/apiProfiles'
+import { getRecoveringTaskDetail, getRecoveringTaskLabel, isRecoveringTask } from '../lib/taskRecovery'
+import { sanitizeRawApiPayload } from '../lib/imageApiShared'
 import { CloseIcon, CodeIcon, CopyIcon, DownloadIcon, EditIcon, LinkIcon, TrashIcon } from './icons'
 
 import ViewportTooltip from './ViewportTooltip'
@@ -262,9 +264,12 @@ export default function DetailModal() {
   const taskProfileName = task.apiProfileName || '未知'
   const taskModel = task.apiModel || '未知'
   const showSourceInfo = Boolean(task.apiProvider || task.apiProfileName || task.apiModel)
-  const isFalReconnecting = task.status === 'error' && task.falRecoverable
-  const isCustomReconnecting = task.status === 'error' && task.customRecoverable
+  const isRecovering = isRecoveringTask(task)
   const rawImageUrls = task.rawImageUrls ?? []
+  const sanitizedRawResponsePayload = useMemo(
+    () => task.rawResponsePayload ? sanitizeRawApiPayload(task.rawResponsePayload) : '',
+    [task.rawResponsePayload],
+  )
   const streamPreviewLen = streamPreviewItems.length
   const currentStreamPreviewSrc = activeStreamPreviewSrc
   const streamPartialImageIds = task.streamPartialImageIds ?? []
@@ -279,7 +284,7 @@ export default function DetailModal() {
   }
 
   const formatDuration = () => {
-    if (task.status === 'running' || isFalReconnecting || isCustomReconnecting) {
+    if (task.status === 'running' || isRecovering) {
       const seconds = Math.max(0, Math.floor((now - task.createdAt) / 1000))
       const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
       const ss = String(seconds % 60).padStart(2, '0')
@@ -433,6 +438,7 @@ export default function DetailModal() {
   }
 
   const handleRetry = () => {
+    if (isRecovering) return
     retryTask(task)
     setDetailTaskId(null)
   }
@@ -641,7 +647,7 @@ export default function DetailModal() {
               )}
             </div>
           )}
-          {(task.status === 'running' || isFalReconnecting) && (
+          {(task.status === 'running' || isRecovering) && (
             <>
               <div className="absolute left-4 top-4 flex items-center gap-1 bg-black/50 text-white text-xs px-2 py-0.5 rounded backdrop-blur-sm font-mono">
                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -704,15 +710,16 @@ export default function DetailModal() {
               )}
             </>
           )}
-          {task.status === 'error' && isFalReconnecting && (
+          {task.status === 'error' && isRecovering && (
             <div className="w-full max-w-md px-4 text-center">
               <svg className="w-10 h-10 text-yellow-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
-              <p className="text-sm font-medium text-yellow-500">重连中</p>
+              <p className="text-sm font-medium text-yellow-500">{getRecoveringTaskLabel(task)}</p>
+              <p className="mt-1 text-xs text-yellow-500/80">{getRecoveringTaskDetail(task)}</p>
             </div>
           )}
-          {task.status === 'error' && !isFalReconnecting && (
+          {task.status === 'error' && !isRecovering && (
             <div className="w-full max-w-md px-4 text-center">
               <svg className="w-10 h-10 text-red-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -1181,7 +1188,7 @@ export default function DetailModal() {
                   type="button"
                   onClick={async () => {
                     try {
-                      await copyTextToClipboard(task.rawResponsePayload!)
+                      await copyTextToClipboard(sanitizedRawResponsePayload)
                       showToast('复制成功', 'success')
                     } catch (err) {
                       showToast(getClipboardFailureMessage('复制失败', err), 'error')
@@ -1203,7 +1210,7 @@ export default function DetailModal() {
             </div>
             <div className="flex-1 min-h-0 overflow-y-auto p-5 bg-gray-50/50 dark:bg-black/20 overscroll-contain">
               <pre data-selectable-text className="text-[11px] sm:text-xs text-gray-600 dark:text-gray-300 font-mono whitespace-pre-wrap break-all select-text">
-                {task.rawResponsePayload.replace(/"(b64_json|base64|data)":\s*"[^"]+"/g, '"$1": "<base64_data>"')}
+                {sanitizedRawResponsePayload}
               </pre>
             </div>
           </div>

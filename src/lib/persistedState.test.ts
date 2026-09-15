@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { AgentConversation, AppSettings, FavoriteCollection } from '../types'
 import { DEFAULT_PARAMS } from '../types'
 import { DEFAULT_IMAGES_MODEL, DEFAULT_SETTINGS, switchApiProfileProvider } from './apiProfiles'
 import { DEFAULT_FAVORITE_COLLECTION_ID } from './favoriteState'
 import { createPersistedState, mergePersistedAgentConversations, migratePersistedState, normalizePersistedState } from './persistedState'
+import { clearLegacyNasSettings } from './nasConfig'
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,image-a' }
 const collectionA: FavoriteCollection = { id: 'collection-a', name: '收藏夹 A', createdAt: 1, updatedAt: 1 }
@@ -58,6 +59,18 @@ function fallback() {
 }
 
 describe('persisted state codec', () => {
+  it('omits NAS credentials and previous presets while preserving local history preferences', () => {
+    vi.stubEnv('VITE_NAS_AUTH_ENABLED', 'true')
+    try {
+      const settings = { ...DEFAULT_SETTINGS, profiles: [{ ...DEFAULT_SETTINGS.profiles[0], apiKey: 'private-nas-key' }], apiKey: 'private-nas-key' }
+      const persisted = createPersistedState({ ...source(settings), previousPresetConfig: { profiles: settings.profiles, customProviders: [] } })
+      expect(JSON.stringify(persisted)).not.toContain('private-nas-key')
+      expect(persisted.previousPresetConfig).toBeNull()
+      const restored = normalizePersistedState({ ...persisted, settings }, fallback(), 100)!
+      expect(JSON.stringify(restored.state.settings)).not.toContain('private-nas-key')
+      expect(restored.state.agentSidebarCollapsed).toBe(true)
+    } finally { clearLegacyNasSettings(); vi.unstubAllEnvs() }
+  })
   it.each([undefined, 'custom-image-model', '', '   '])('restores profile and legacy top-level tool model %s without autofilling', (imageGenerationModel) => {
     const profile = { apiMode: 'responses', model: 'legacy-text-model', ...(imageGenerationModel === undefined ? {} : { imageGenerationModel }) }
     for (const settings of [profile, { profiles: [profile] }]) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore } from '../store'
+import { isNasAuthEnabled } from '../lib/nasAuth'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 import { useTooltip } from '../hooks/useTooltip'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
@@ -252,6 +253,7 @@ export default function Header() {
             </button>
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {isNasAuthEnabled() && <button onClick={() => window.dispatchEvent(new Event('nas-logout'))} className="px-2 min-h-11 text-sm text-gray-600 dark:text-gray-300">退出</button>}
             {!isPwaInstalled && (
               <div
                 className="relative"
