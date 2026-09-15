@@ -239,6 +239,11 @@ export default function DetailModal() {
     }
   }, [maskTargetSrc, maskSrc])
 
+  const sanitizedRawResponsePayload = useMemo(
+    () => task?.rawResponsePayload ? sanitizeRawApiPayload(task.rawResponsePayload) : '',
+    [task?.rawResponsePayload],
+  )
+
   if (!task) return null
 
   const isAgentTask = task.sourceMode === 'agent' || Boolean(task.agentConversationId || task.agentRoundId)
@@ -274,10 +279,6 @@ export default function DetailModal() {
   const showSourceInfo = Boolean(task.apiProvider || task.apiProfileName || task.apiModel)
   const isRecovering = isRecoveringTask(task)
   const rawImageUrls = task.rawImageUrls ?? []
-  const sanitizedRawResponsePayload = useMemo(
-    () => task.rawResponsePayload ? sanitizeRawApiPayload(task.rawResponsePayload) : '',
-    [task.rawResponsePayload],
-  )
   const streamPreviewLen = streamPreviewItems.length
   const currentStreamPreviewSrc = activeStreamPreviewSrc
   const streamPartialImageIds = task.streamPartialImageIds ?? []
