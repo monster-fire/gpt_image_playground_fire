@@ -1680,11 +1680,6 @@ export default function InputBar() {
           onDeleteSelected={handleDeleteSelected}
         />
         <div ref={cardRef} className={`bg-white/70 dark:bg-gray-900/70 backdrop-blur-2xl border border-white/50 dark:border-white/[0.08] shadow-[0_8px_30px_rgb(0,0,0,0.08)] dark:shadow-[0_8px_30px_rgb(0,0,0,0.3)] rounded-2xl sm:rounded-3xl p-3 sm:p-4 ring-1 ring-black/5 dark:ring-white/10${promptExpanded ? ' flex min-h-0 flex-1 flex-col' : ''}`}>
-          <PromptPresetPicker />
-          {appMode === 'gallery' && (selectedPreset || finalPromptEdit) && <details className="mb-2 text-xs">
-            <summary className="min-h-11 flex items-center cursor-pointer">最终提示词{finalPromptEdit ? '（已手动编辑）' : ''}</summary>
-            <textarea aria-label="最终提示词" className="w-full h-28 p-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 resize-y" value={finalPromptEdit?.text ?? combinedPrompt} onChange={(event) => setFinalPromptEdit({ text: event.target.value, source: finalPromptEdit?.source ?? combinedPrompt })} />
-          </details>}
           {appMode === 'agent' && (activeAgentIsRunning || submitting) && <div className="mb-2 text-xs"><AgentProgressLabel conversationId={activeAgentConversationId ?? ''} /></div>}
           {/* 移动端拖动条 */}
           <div
@@ -1856,13 +1851,19 @@ export default function InputBar() {
             )}
           </div>
 
+          {appMode === 'gallery' && (selectedPreset || finalPromptEdit) && <details className="mt-2 text-xs">
+            <summary className="min-h-11 flex items-center cursor-pointer">最终提示词{finalPromptEdit ? '（已手动编辑）' : ''}</summary>
+            <textarea aria-label="最终提示词" className="w-full h-28 p-2 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 resize-y" value={finalPromptEdit?.text ?? combinedPrompt} onChange={(event) => setFinalPromptEdit({ text: event.target.value, source: finalPromptEdit?.source ?? combinedPrompt })} />
+          </details>}
+
           {/* 参数 + 按钮 */}
           <div className="mt-3">
             {/* 桌面端布局 */}
-            <div className="hidden sm:flex items-end justify-between gap-3">
-              {renderParams('grid-cols-6')}
+            <div className="hidden sm:flex flex-wrap items-end justify-between gap-3">
+              <div className="min-w-0 flex-[1_1_28rem]">{renderParams('grid-cols-6')}</div>
 
-              <div className="flex gap-2 flex-shrink-0 mb-0.5">
+              <div data-input-tools className="ml-auto flex min-w-0 max-w-full items-center gap-2 mb-0.5">
+                {!isMobile && <PromptPresetPicker />}
                 <div
                   className="relative"
                   onMouseEnter={() => setAttachHover(true)}
@@ -1924,9 +1925,10 @@ export default function InputBar() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div data-input-tools className="flex min-w-0 items-center gap-2">
+                {isMobile && <PromptPresetPicker />}
                 <div
-                  className="relative"
+                  className="relative shrink-0"
                   onMouseEnter={() => setAttachHover(true)}
                   onMouseLeave={() => setAttachHover(false)}
                 >
@@ -1991,7 +1993,7 @@ export default function InputBar() {
                   )}
                 </div>
                 <div
-                  className="relative flex-1"
+                  className="relative ml-auto min-w-[104px] flex-1"
                   onMouseEnter={() => setSubmitHover(true)}
                   onMouseLeave={() => setSubmitHover(false)}
                 >

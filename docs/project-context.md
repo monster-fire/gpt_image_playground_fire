@@ -159,6 +159,8 @@ Agent 图片任务通过 `agentConversationId`、`agentRoundId`、`agentMessageI
 
 ## 7. 按修改目标找入口
 
+提示词预设入口位于 `InputBar` 底部工具栏；`PromptPresetPicker` 负责图标入口、选中名称与取消、可搜索弹层和管理入口。弹层跟随工具栏锚点并受视口约束，画廊的最终提示词预览位于主输入框下方；布局约定见根目录 `DESIGN.md`。`scripts/test-p1-generation.browser.mjs` 同时覆盖桌面/移动端预设布局和原有生成流程。
+
 | 修改目标 | 优先阅读 | 对应验证位置 |
 | --- | --- | --- |
 | 生图参数、供应商兼容 | `types.ts`、`apiProfiles.ts`、`api.ts`、`openaiCompatibleImageApi.ts`、`falAiImageApi.ts` | `api.test.ts`、`apiProfiles.test.ts`、`falAiImageApi.test.ts`、`paramCompatibility.test.ts`。 |

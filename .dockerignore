@@ -13,3 +13,5 @@ data
 *.zip
 *.log
 dev-proxy.config.json
+/gpt-image-config.json
+/images/

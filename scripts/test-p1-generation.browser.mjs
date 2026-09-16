@@ -175,6 +175,82 @@ try {
     })
   })()`)
 
+  await evaluate(page.sessionId, `(async () => {
+    const presets = await import('/src/lib/promptPresets.ts')
+    await presets.savePromptPreset({ name: '自然光写真与日常生活场景的超长预设名称测试', content: '自然光，真实质感' })
+    await presets.savePromptPreset({ name: 'Watercolor 插画', content: '水彩插画' })
+    window.toolbarPresetId = presets.getPromptPresetState().presets.find((p) => p.name.startsWith('自然光')).id
+  })()`)
+  const toolbarEvidence = []
+  for (const [width, height] of [[1440, 900], [900, 800], [768, 800], [640, 800], [390, 844], [320, 740]]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: width < 640 }, page.sessionId)
+    await evaluate(page.sessionId, "(async () => { const store = await import('/src/store.ts'); store.selectPromptPreset(null) })()")
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    await waitFor(page.sessionId, "document.querySelectorAll('[data-preset-picker]').length === 1")
+    const checkToolbar = async (selected) => {
+      const result = await evaluate(page.sessionId, `(() => {
+        const picker = document.querySelector('[data-preset-picker]')
+        const bar = document.querySelector('[data-input-bar]')
+        const tools = picker.closest('[data-input-tools]')
+        const editor = bar.querySelector('[contenteditable]')
+        const bounds = (el) => { const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom } }
+        const buttons = Array.from(tools.querySelectorAll('button')).filter((el) => el.getClientRects().length).map((el) => ({ label: el.getAttribute('aria-label'), ...bounds(el) }))
+        return { picker: bounds(picker), bar: bounds(bar), editor: bounds(editor), buttons, overflow: document.documentElement.scrollWidth > innerWidth, selectedName: picker.innerText }
+      })()`)
+      if (result.overflow || result.picker.y < result.editor.bottom) throw new Error(`Preset toolbar placement failed at ${width}`)
+      for (let i = 0; i < result.buttons.length; i++) {
+        const button = result.buttons[i]
+        if (button.x < result.bar.x || button.right > result.bar.right || button.width < 24) throw new Error(`Toolbar button clipped at ${width}: ${button.label}`)
+        for (const next of result.buttons.slice(i + 1)) {
+          if (Math.min(button.right, next.right) - Math.max(button.x, next.x) > 1 && Math.min(button.bottom, next.bottom) - Math.max(button.y, next.y) > 1) throw new Error(`Toolbar buttons overlap at ${width}`)
+        }
+      }
+      toolbarEvidence.push({ width, selected, ...result })
+      await screenshot(page, `preset-toolbar-${width}-${selected ? 'selected' : 'empty'}.png`)
+    }
+    await checkToolbar(false)
+    await evaluate(page.sessionId, "document.querySelector('[data-preset-picker] button').click()")
+    await waitFor(page.sessionId, "!!document.querySelector('[aria-label=\"选择提示词预设\"]')")
+    const popup = await evaluate(page.sessionId, `(() => {
+      const r = document.querySelector('[aria-label="选择提示词预设"]').getBoundingClientRect()
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, visible: r.width > 0 && r.height > 0 }
+    })()`)
+    if (!popup.visible || popup.left < 0 || popup.top < 0 || popup.right > width || popup.bottom > height) throw new Error(`Preset popup outside viewport at ${width}: ${JSON.stringify(popup)}`)
+    await screenshot(page, `preset-toolbar-${width}-menu.png`)
+    await evaluate(page.sessionId, "Array.from(document.querySelectorAll('[role=\"option\"]')).find((el) => el.textContent.startsWith('自然光')).click()")
+    await waitFor(page.sessionId, "!!document.querySelector('[aria-label=\"取消预设\"]') && !document.querySelector('[aria-label=\"选择提示词预设\"]')")
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    await checkToolbar(true)
+    await evaluate(page.sessionId, "document.querySelector('[aria-label=\"取消预设\"]').click()")
+    await waitFor(page.sessionId, "!document.querySelector('[aria-label=\"取消预设\"]')")
+  }
+  await writeFile(join(artifacts, 'preset-toolbar-evidence.json'), JSON.stringify(toolbarEvidence, null, 2))
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 860, deviceScaleFactor: 1, mobile: false }, page.sessionId)
+  await evaluate(page.sessionId, `(async () => {
+    const { useStore, selectPromptPreset } = await import('/src/store.ts')
+    const settings = useStore.getState().settings
+    useStore.getState().setSettings({ profiles: settings.profiles.map((p) => ({ ...p, apiMode: 'responses' })) })
+    useStore.getState().setAppMode('agent')
+    useStore.getState().createAgentConversation()
+    selectPromptPreset(window.toolbarPresetId)
+  })()`)
+  await waitFor(page.sessionId, "!!document.querySelector('[aria-label=\"取消预设\"]')")
+  await screenshot(page, 'preset-toolbar-agent-selected.png')
+  await evaluate(page.sessionId, "(async () => (await import('/src/store.ts')).useStore.getState().setAppMode('gallery'))()")
+  await waitFor(page.sessionId, "!document.querySelector('[aria-label=\"取消预设\"]')")
+  await evaluate(page.sessionId, "(async () => (await import('/src/store.ts')).useStore.getState().setAppMode('agent'))()")
+  await waitFor(page.sessionId, "!!document.querySelector('[aria-label=\"取消预设\"]')")
+  await evaluate(page.sessionId, `(async () => {
+    const { useStore, selectPromptPreset } = await import('/src/store.ts')
+    selectPromptPreset(null)
+    useStore.getState().setAppMode('gallery')
+    useStore.getState().setSettings({ profiles: useStore.getState().settings.profiles.map((p) => ({ ...p, apiMode: 'images' })) })
+  })()`)
+  await evaluate(page.sessionId, `(async () => {
+    const presets = await import('/src/lib/promptPresets.ts')
+    for (const preset of [...presets.getPromptPresetState().presets]) await presets.deletePromptPreset(preset.id)
+  })()`)
+
   const clickSubmit = () => `(() => {
     const buttons = Array.from(document.querySelectorAll('button')).filter((button) => !button.disabled)
     const button = buttons.reverse().find((item) => item.innerText.includes('生成') || item.getAttribute('aria-label')?.includes('生成'))

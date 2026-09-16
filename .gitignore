@@ -9,6 +9,7 @@ dev-proxy.config.json
 .env.development
 
 # 本地运行配置
+/gpt-image-config.json
 /config/gpt-image-playground.json
 /data/
 

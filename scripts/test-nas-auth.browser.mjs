@@ -75,6 +75,10 @@ try {
   await waitFor(one, "!!document.querySelector('#nas-password')")
   if (await evaluate(one, "!!document.querySelector('header')")) throw new Error('Private workspace visible before login')
   await screenshot(one, 'login-desktop.png')
+  await evaluate(one, `localStorage.setItem('gpt-image-playground', JSON.stringify({
+    version: 2,
+    state: { settings: { profiles: [{ id: 'legacy-browser', name: 'Legacy browser profile', provider: 'openai', baseUrl: 'https://legacy.example.com/v1', apiKey: 'legacy-browser-key', model: 'legacy-model' }] } },
+  }))`)
   const login = async (password) => {
     await evaluate(one, `(() => {
       const input = document.querySelector('#nas-password')
@@ -88,11 +92,17 @@ try {
   if (await evaluate(one, "document.querySelector('#nas-password').value") !== 'wrong-password') throw new Error('Failed login cleared password')
   await login('browser-test-only')
   await waitFor(one, "!!document.querySelector('header')")
+  if (await evaluate(one, "(async () => (await import('/src/store.ts')).useStore.getState().showSettings)()")) throw new Error('Legacy config opened settings automatically after login')
+  if (!await evaluate(one, "(async () => Boolean((await import('/src/lib/nasConfig.ts')).getLegacyNasSettings()))()")) throw new Error('Legacy config was discarded on login')
+  await evaluate(one, "(async () => (await import('/src/store.ts')).useStore.getState().setShowSettings(true))()")
+  await waitFor(one, "Array.from(document.querySelectorAll('button')).some((button) => button.textContent === '迁移旧配置')")
+  await evaluate(one, "(async () => (await import('/src/store.ts')).useStore.getState().setShowSettings(false))()")
   const cookies = await send('Network.getCookies', { urls: [url] }, one)
   const cookie = cookies.cookies.find((cookie) => cookie.name === 'gip_session')
   if (!cookie?.httpOnly || cookie.sameSite !== 'Lax' || Math.abs(cookie.expires - Date.now() / 1000 - 604800) > 20) throw new Error('Invalid session cookie policy')
   const two = await open()
   await waitFor(two, "!!document.querySelector('header')")
+  if (await evaluate(two, "(async () => (await import('/src/store.ts')).useStore.getState().showSettings)()")) throw new Error('Legacy config opened settings automatically in a new tab')
   await evaluate(one, `(async () => {
     const { useStore } = await import('/src/store.ts')
     const { saveNasSettings, waitForNasConfig } = await import('/src/lib/nasConfig.ts')
@@ -106,9 +116,13 @@ try {
   const saved = JSON.parse(await readFile(join(directory, 'config.json'), 'utf8'))
   if (saved.profiles[0].apiKey !== 'browser-supplier-key') throw new Error('Config was not saved to NAS')
   if (await evaluate(one, "JSON.stringify(localStorage).includes('browser-supplier-key')")) throw new Error('Supplier key persisted in localStorage')
+  const beforeReload = await evaluate(one, 'performance.timeOrigin')
   await send('Page.reload', {}, one)
+  await waitFor(one, `performance.timeOrigin !== ${beforeReload}`)
   await waitFor(one, "!!document.querySelector('header')")
   if (!await evaluate(one, "(async () => (await import('/src/store.ts')).useStore.getState().settings.profiles[0].apiKey === 'browser-supplier-key')()")) throw new Error('NAS config not restored after refresh')
+  if (await evaluate(one, "(async () => (await import('/src/store.ts')).useStore.getState().showSettings)()")) throw new Error('Legacy config opened settings automatically after refresh')
+  if (!await evaluate(one, "(async () => (await import('/src/lib/nasConfig.ts')).getLegacyNasSettings()?.profiles?.some((profile) => profile.id === 'legacy-browser'))()")) throw new Error('Legacy config was lost after refresh')
   await screenshot(one, 'workspace-desktop.png')
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, one)
   await screenshot(one, 'workspace-mobile.png')
@@ -130,7 +144,7 @@ try {
   await screenshot(one, 'login-mobile.png')
   const status = await evaluate(one, "fetch('/api/api-config').then(r => r.status)")
   if (status !== 401) throw new Error('Config accessible after logout')
-  console.log('PASS: login, wrong password, fixed cookie expiry, reload, NAS save, no persisted key, desktop/mobile, missing lightbox navigation/Escape, multi-tab logout, revoked config access')
+  console.log('PASS: login, wrong password, fixed cookie expiry, reload, NAS save, no persisted key, no automatic settings popup on login/new tab/refresh, preserved legacy config and manual migration entry, desktop/mobile, missing lightbox navigation/Escape, multi-tab logout, revoked config access')
   await send('Browser.close')
 } finally {
   socket?.close()

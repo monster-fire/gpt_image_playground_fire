@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { initStore, stopAllActiveRequests, useStore } from '../store'
 import { checkNasSession, expireNasSession, nasFetch, type NasSession } from '../lib/nasAuth'
-import { captureLegacySettings, clearLegacyNasSettings, clearNasConfig, getLegacyNasSettings, loadNasSettings, localOnlySettings } from '../lib/nasConfig'
+import { captureLegacySettings, clearLegacyNasSettings, clearNasConfig, loadNasSettings, localOnlySettings } from '../lib/nasConfig'
 import { clearPromptPresets, loadPromptPresets, setupPromptPresetAutoSync } from '../lib/promptPresets'
 
 let initialized: Promise<void> | null = null
@@ -35,7 +35,6 @@ export default function NasAuthGate({ children }: { children: ReactNode }) {
       setSession(nextSession)
       setPassword('')
       setPhase('ready')
-      if (getLegacyNasSettings()) useStore.getState().setShowSettings(true)
     } catch (cause) {
       if (current !== attempt.current) return
       setError(cause instanceof Error ? cause.message : '连接失败，请重试')
